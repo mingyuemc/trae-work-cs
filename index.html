@@ -89,12 +89,34 @@ addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
 function consume(code) { if (pressed[code]) { pressed[code] = false; return true; } return false; }
 function clearPressed() { for (const k in pressed) delete pressed[k]; }
 
-// ================= 音效（WebAudio 合成） =================
+// ================= 音频引擎（WebAudio 实时合成，无需外部音频文件） =================
 let actx = null, muted = false;
+let masterGain = null, sfxGain = null, musicGain = null, noiseBuf = null;
+
+const N = m => 440 * Math.pow(2, (m - 69) / 12);   // MIDI 音高 → 频率
+
 function initAudio() {
-  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { } }
+  if (!actx) {
+    try {
+      actx = new (window.AudioContext || window.webkitAudioContext)();
+      // 总线：音效 + 音乐 → 总输出
+      masterGain = actx.createGain(); masterGain.gain.value = 1; masterGain.connect(actx.destination);
+      sfxGain = actx.createGain(); sfxGain.gain.value = 0.85; sfxGain.connect(masterGain);
+      musicGain = actx.createGain(); musicGain.gain.value = 0; musicGain.connect(masterGain);
+      // 噪声缓冲：供鼓组与打击音使用
+      noiseBuf = actx.createBuffer(1, Math.floor(actx.sampleRate * 0.5), actx.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    } catch (e) { actx = null; }
+  }
   if (actx && actx.state === 'suspended') actx.resume();
+  if (actx) {
+    if (Music.pending) { const n = Music.pending; Music.pending = null; Music.play(n); }
+    Music.apply();
+  }
 }
+
+// ---- 音效 ----
 function tone(freq, dur, type, vol, slideTo) {
   if (!actx || muted) return;
   const t = actx.currentTime;
@@ -104,22 +126,182 @@ function tone(freq, dur, type, vol, slideTo) {
   if (slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20, slideTo), t + dur);
   g.gain.setValueAtTime(vol || 0.08, t);
   g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  o.connect(g); g.connect(actx.destination);
+  o.connect(g); g.connect(sfxGain);
   o.start(t); o.stop(t + dur + 0.02);
 }
+function noiseHit(dur, vol, hp, t, dest) {
+  if (!actx || muted || !noiseBuf) return;
+  const at = t === undefined ? actx.currentTime : t;
+  const s = actx.createBufferSource(); s.buffer = noiseBuf;
+  const f = actx.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = hp || 1200;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(vol, at);
+  g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+  s.connect(f); f.connect(g); g.connect(dest || sfxGain);
+  s.start(at); s.stop(at + dur + 0.02);
+}
+
 const SFX = {
-  hit()   { tone(230, 0.12, 'square', 0.09, 90); },
-  slash() { tone(760, 0.08, 'sawtooth', 0.05, 300); },
+  hit()   { tone(230, 0.12, 'square', 0.09, 90); noiseHit(0.06, 0.05, 1800); },
+  slash() { tone(760, 0.08, 'sawtooth', 0.05, 300); noiseHit(0.05, 0.03, 2400); },
   shoot() { tone(560, 0.13, 'triangle', 0.06, 190); },
-  dash()  { tone(300, 0.2, 'sawtooth', 0.07, 950); },
+  dash()  { tone(300, 0.2, 'sawtooth', 0.07, 950); noiseHit(0.16, 0.035, 900); },
   jump()  { tone(430, 0.1, 'sine', 0.05, 720); },
-  boom()  { tone(130, 0.3, 'sawtooth', 0.11, 45); },
-  ko()    { tone(170, 0.5, 'sawtooth', 0.1, 55); },
+  land()  { tone(140, 0.14, 'sine', 0.07, 60); noiseHit(0.08, 0.04, 700); },
+  boom()  { tone(130, 0.3, 'sawtooth', 0.11, 45); noiseHit(0.22, 0.07, 500); },
+  ko()    { tone(170, 0.5, 'sawtooth', 0.1, 55); noiseHit(0.3, 0.06, 400); },
   nav()   { tone(600, 0.06, 'square', 0.05); },
   count() { tone(680, 0.12, 'sine', 0.07); },
-  go()    { tone(880, 0.28, 'sine', 0.09, 1250); },
-  win()   { tone(520, 0.5, 'triangle', 0.08, 1040); }
+  go()    { tone(880, 0.28, 'sine', 0.09, 1250); }
 };
+
+// ---- 背景音乐：实时合成的循环乐段 ----
+// 单音（可指定音色、音量、起音时间与输出总线）
+function blip(midi, t, dur, type, vol, dest, attack) {
+  if (!actx || muted || !dest) return;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(N(midi), t);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + (attack || 0.012));
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(dest);
+  o.start(t); o.stop(t + dur + 0.04);
+}
+// 铺底和弦：两个轻微失谐的锯齿波过低通，声音更厚
+function pad(midi, t, dur, vol, dest) {
+  if (!actx || muted || !dest) return;
+  const o = actx.createOscillator(), o2 = actx.createOscillator();
+  const f = actx.createBiquadFilter(), g = actx.createGain();
+  o.type = 'sawtooth'; o2.type = 'sawtooth';
+  o.frequency.setValueAtTime(N(midi), t);
+  o2.frequency.setValueAtTime(N(midi) * 1.006, t);
+  f.type = 'lowpass'; f.frequency.value = 950; f.Q.value = 0.6;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + 0.55);
+  g.gain.setValueAtTime(vol, t + dur * 0.7);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(f); o2.connect(f); f.connect(g); g.connect(dest);
+  o.start(t); o2.start(t); o.stop(t + dur + 0.05); o2.stop(t + dur + 0.05);
+}
+function kick(t, dest) {
+  if (!actx || muted || !dest) return;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(155, t);
+  o.frequency.exponentialRampToValueAtTime(42, t + 0.12);
+  g.gain.setValueAtTime(0.5, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+  o.connect(g); g.connect(dest); o.start(t); o.stop(t + 0.24);
+}
+const snare = (t, dest) => noiseHit(0.13, 0.22, 1500, t, dest);
+const hat   = (t, dest) => noiseHit(0.035, 0.08, 7000, t, dest);
+
+// 和声进行：Am - F - C - G，每小节八个八分音符
+const ROOTS = [45, 41, 48, 43];
+const TRIAD = [[57, 60, 64], [53, 57, 60], [60, 64, 67], [55, 59, 62]];
+// 主旋律（A 小调五声音阶），后半段进入
+const LEAD = { 16: [76, 3], 19: [74, 1], 20: [72, 2], 24: [69, 4], 29: [72, 1], 30: [74, 2], 31: [76, 1] };
+
+const TRACKS = {
+  // 主菜单：同一主题的舒缓编曲，无鼓组
+  menu: {
+    bpm: 74, len: 32, vol: 0.55,
+    play(step, t, sd, dest) {
+      const bar = (step / 8) | 0, s = step % 8, root = ROOTS[bar], triad = TRIAD[bar];
+      if (s === 0) {
+        blip(root - 12, t, sd * 7.5, 'triangle', 0.16, dest, 0.4);
+        for (const m of triad) pad(m, t, sd * 7.6, 0.05, dest);
+      }
+      if (s % 2 === 0) blip(triad[(s / 2) % 3] + 12, t, sd * 1.3, 'triangle', 0.05, dest, 0.05);
+    }
+  },
+  // 对战：推进感强，含鼓组、琶音与旋律
+  battle: {
+    bpm: 138, len: 32, vol: 0.5,
+    play(step, t, sd, dest) {
+      const bar = (step / 8) | 0, s = step % 8, root = ROOTS[bar], triad = TRIAD[bar];
+      if (s === 0 || s === 3 || s === 4) blip(root - 12, t, sd * 1.5, 'square', 0.13, dest, 0.01);
+      if (s === 6) blip(root, t, sd * 1.2, 'square', 0.1, dest, 0.01);
+      if (s === 7) blip(root - 5, t, sd * 0.9, 'square', 0.09, dest, 0.01);
+      if (s === 0 || s === 4) kick(t, dest);
+      if (s === 2 || s === 6) snare(t, dest);
+      if (s % 2 === 1) hat(t, dest);
+      blip(triad[s % 3] + 12, t, sd * 0.85, 'triangle', 0.045, dest, 0.01);
+      const ld = LEAD[step];
+      if (ld) blip(ld[0], t, sd * ld[1], 'square', 0.075, dest, 0.01);
+    }
+  }
+};
+
+// 调度器：提前一小段时间排布音符，避免 setInterval 抖动导致节奏不稳
+const Music = {
+  track: null, pending: null, voice: null, step: 0, nextTime: 0, timer: null, duck: 1,
+
+  play(name) {
+    if (!actx) { this.pending = name; return; }
+    if (this.track === name && this.voice) return;
+    const now = actx.currentTime;
+    if (this.voice) this.fadeVoice(this.voice, 0, now + 0.45);
+    this.track = name; this.step = 0; this.nextTime = now + 0.08;
+    const v = actx.createGain();
+    v.gain.setValueAtTime(0, now);
+    v.gain.linearRampToValueAtTime(TRACKS[name].vol, now + 0.9);   // 淡入
+    v.connect(musicGain);
+    this.voice = v;
+    this.apply(0.5);
+    if (!this.timer) this.timer = setInterval(() => this.tick(), 25);
+  },
+
+  stop() {
+    this.pending = null;
+    if (actx && this.voice) this.fadeVoice(this.voice, 0, actx.currentTime + 0.4);
+    this.voice = null; this.track = null;
+    this.apply(0.4);
+  },
+
+  fadeVoice(v, to, endTime) {
+    const g = v.gain, now = actx.currentTime;
+    if (g.cancelAndHoldAtTime) g.cancelAndHoldAtTime(now);
+    else { g.cancelScheduledValues(now); g.setValueAtTime(g.value, now); }
+    g.linearRampToValueAtTime(to, endTime);
+    setTimeout(() => { try { v.disconnect(); } catch (e) { } }, (endTime - now + 0.25) * 1000);
+  },
+
+  // 静音 / 暂停时压低音乐
+  apply(fade) {
+    if (!actx || !musicGain) return;
+    const now = actx.currentTime, g = musicGain.gain;
+    if (g.cancelAndHoldAtTime) g.cancelAndHoldAtTime(now);
+    else { g.cancelScheduledValues(now); g.setValueAtTime(g.value, now); }
+    g.linearRampToValueAtTime(muted ? 0 : this.duck, now + (fade === undefined ? 0.6 : fade));
+  },
+
+  tick() {
+    if (!actx || !this.track || !this.voice) return;
+    if (muted) { this.nextTime = actx.currentTime + 0.1; return; }
+    const tr = TRACKS[this.track];
+    const sd = 60 / tr.bpm / 2;
+    if (this.nextTime < actx.currentTime) this.nextTime = actx.currentTime + 0.02;
+    while (this.nextTime < actx.currentTime + 0.14) {
+      tr.play(this.step, this.nextTime, sd, this.voice);
+      this.step = (this.step + 1) % tr.len;
+      this.nextTime += sd;
+    }
+  }
+};
+
+// 胜利号角（一次性，走音效总线，因此停止音乐后依然可发声）
+function playVictory() {
+  if (!actx || muted) return;
+  const t0 = actx.currentTime + 0.08, D = sfxGain;
+  [[69, 0, .18], [72, .18, .18], [76, .36, .18], [81, .56, .75]]
+    .forEach(([m, dt, d]) => blip(m, t0 + dt, d, 'square', 0.14, D, 0.01));
+  [57, 60, 64, 69].forEach(m => blip(m, t0 + .56, 1.1, 'triangle', 0.085, D, 0.02));
+  noiseHit(0.4, 0.05, 3000, t0 + .56, D);
+}
+
+Music.play('menu');   // 首次按键后（音频解锁）自动开始播放
 
 // ================= 特效容器 =================
 let particles = [], floaters = [], projectiles = [];
@@ -460,6 +642,7 @@ class Fighter {
     this.y += this.vy;
     if (this.y >= GROUND) {
       if (!this.onGround && this.vy > 3) {
+        if (this.vy > 7) SFX.land();
         for (let i = 0; i < 8; i++) {
           particles.push({
             x: this.x + rand(-18, 18), y: GROUND,
@@ -1034,6 +1217,9 @@ function startMatch(modeIdx) {
   p2.ai = aiLevel ? new EnemyAI(aiLevel) : null;
   p2.dmgMul = aiLevel ? DIFFS[aiLevel].dmg : 1;
   wins = [0, 0]; round = 1;
+  Music.duck = 1;
+  Music.play('battle');   // 进入对战：切换到战斗曲
+  Music.apply(0.3);
   startRound();
 }
 
@@ -1071,9 +1257,10 @@ function updateProjectiles() {
 function fixedUpdate() {
   time++;
   if (shakeT > 0) shakeT--;
-  if (consume('KeyM')) muted = !muted;
+  if (consume('KeyM')) { muted = !muted; Music.apply(0.15); }
 
   if (gameState === 'menu') {
+    Music.play('menu');
     const before = menuIndex;
     if (consume('KeyW') || consume('ArrowUp')) menuIndex = (menuIndex + MENU.length - 1) % MENU.length;
     if (consume('KeyS') || consume('ArrowDown')) menuIndex = (menuIndex + 1) % MENU.length;
@@ -1090,7 +1277,7 @@ function fixedUpdate() {
     clearPressed(); return;
   }
   if (consume('KeyR')) { startMatch(); clearPressed(); return; }
-  if (consume('KeyP')) paused = !paused;
+  if (consume('KeyP')) { paused = !paused; Music.duck = paused ? 0.3 : 1; Music.apply(0.25); }
   if (paused) { clearPressed(); return; }
 
   if (gameState === 'countdown') {
@@ -1119,7 +1306,10 @@ function fixedUpdate() {
     resolveBodyCollision();
     updateProjectiles(); updateParticles(); updateFloaters();
     if (stateT >= 150) {
-      if (wins[0] >= 2 || wins[1] >= 2) { gameState = 'gameover'; stateT = 0; SFX.win(); }
+      if (wins[0] >= 2 || wins[1] >= 2) {
+        gameState = 'gameover'; stateT = 0;
+        Music.stop(); playVictory();   // 决出胜负：停战斗曲，吹胜利号角
+      }
       else { round++; startRound(); }
     }
     clearPressed(); return;
@@ -1309,7 +1499,7 @@ function drawMenu() {
   ctx.textAlign = 'center';
   ctx.font = '16px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(160,180,220,0.7)';
-  ctx.fillText('W / S 或 ↑ / ↓ 切换模式    ·    数字键 1-4 直选', W / 2, 645);
+  ctx.fillText('W / S 或 ↑ / ↓ 切换模式    ·    数字键 1-4 直选    ·    M 静音', W / 2, 645);
 
   const a = 0.5 + 0.5 * Math.sin(time * 0.08);
   ctx.font = 'bold 26px "PingFang SC","Microsoft YaHei",sans-serif';
