@@ -28,15 +28,15 @@ const stage = document.getElementById('stage');
 const W = 1280, H = 720;
 const GROUND = 620;
 const GRAVITY = 0.9;
-const WALL_L = 70, WALL_R = W - 70;
+const WALL_L = 120, WALL_R = W - 120;
 const TAU = Math.PI * 2;
 
 const rand = (a, b) => a + Math.random() * (b - a);
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 const lerp = (a, b, t) => a + (b - a) * t;
 const easeOut = t => 1 - Math.pow(1 - t, 3);
-const easeInOut = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 const sign = v => v < 0 ? -1 : 1;
+const randInt = (a, b) => Math.floor(rand(a, b + 1));
 
 function mulberry32(a) {
   return function () {
@@ -115,6 +115,7 @@ const SFX = {
   jump()  { tone(430, 0.1, 'sine', 0.05, 720); },
   boom()  { tone(130, 0.3, 'sawtooth', 0.11, 45); },
   ko()    { tone(170, 0.5, 'sawtooth', 0.1, 55); },
+  nav()   { tone(600, 0.06, 'square', 0.05); },
   count() { tone(680, 0.12, 'sine', 0.07); },
   go()    { tone(880, 0.28, 'sine', 0.09, 1250); },
   win()   { tone(520, 0.5, 'triangle', 0.08, 1040); }
@@ -238,6 +239,123 @@ class Projectile {
   }
 }
 
+// ================= 敌人 AI =================
+const DIFFS = {
+  easy:   { label: '简单', dmg: 0.60, react: 34, skillChance: 0.25, dodge: 0.15, aggro: 0.45, hold: [34, 84] },
+  normal: { label: '普通', dmg: 0.90, react: 18, skillChance: 0.45, dodge: 0.42, aggro: 0.65, hold: [22, 58] },
+  hard:   { label: '困难', dmg: 1.20, react: 10, skillChance: 0.65, dodge: 0.72, aggro: 0.92, hold: [14, 36] }
+};
+
+class EnemyAI {
+  constructor(level) {
+    this.level = level;
+    this.p = DIFFS[level] || DIFFS.normal;
+    this.reset();
+  }
+  reset() {
+    this.t = 0;
+    this.aimT = 0;      // 进入射程后的“瞄准”帧数，用于模拟反应时间
+    this.reactCd = 0;
+    this.decideCd = 0;
+    this.step = 0;
+    this.actCd = 0;
+  }
+  // 返回一个与人类输入同构的意图对象
+  think(self, opp, prs) {
+    const p = this.p;
+    const out = { left: false, right: false, jump: false, attack: false, skill: false };
+    this.t++;
+    if (this.reactCd > 0) this.reactCd--;
+    if (this.actCd > 0) this.actCd--;
+
+    const dx = opp.x - self.x;
+    const dist = Math.abs(dx);
+    const dir = dx >= 0 ? 1 : -1;
+
+    // ---------- 1. 闪避：来袭弹道与突进 ----------
+    let threatDist = 1e9;
+    for (const pr of prs) {
+      if (pr.owner === self) continue;
+      const rel = self.x - pr.x;
+      const toward = (pr.vx > 0 && rel > 0) || (pr.vx < 0 && rel < 0);
+      if (toward && Math.abs(pr.y - (self.y - 100)) < 120) {
+        threatDist = Math.min(threatDist, Math.abs(rel));
+      }
+    }
+    let dodging = false;
+    if (self.onGround && this.reactCd <= 0 && threatDist < 340) {
+      this.reactCd = 5;
+      if (Math.random() < p.dodge) {
+        if (self.type === 'sword' && self.skillCd <= 0 && threatDist < 240) {
+          out.skill = true;         // 剑客用无敌冲刺穿过去
+        } else {
+          out.jump = true;          // 法师起跳躲弹道
+        }
+        dodging = true;
+      }
+    }
+    if (!dodging && self.onGround && this.reactCd <= 0 && opp.dashT > 0 && dist < 300) {
+      this.reactCd = 5;
+      if (Math.random() < p.dodge) { out.jump = true; dodging = true; }
+    }
+
+    // ---------- 2. 距离控制 ----------
+    let desired;
+    if (self.type === 'sword') {
+      desired = self.hp / self.maxHp < 0.3 ? 62 : 70;   // 近战：贴上去
+    } else {
+      desired = 260 + (p.aggro - 0.45) * 200;           // 法师：难度越高站位越稳
+      if (dist < 170) desired = Math.max(desired, 390); // 被贴脸时后撤
+      if (opp.hp / opp.maxHp < 0.3) desired = Math.max(desired, 320);
+    }
+
+    let move = 0;
+    if (!dodging) {
+      if (dist < desired - 60) move = -dir;
+      else if (dist > desired + 60) move = dir;
+    }
+    // 巡航窗口：在安全距离内随机小幅走位
+    if (this.decideCd > 0) this.decideCd--;
+    else {
+      this.decideCd = randInt(p.hold[0], p.hold[1]);
+      this.step = Math.random() < 0.45 ? (Math.random() < 0.5 ? -1 : 1) : 0;
+    }
+    if (!dodging && move === 0) move = this.step;
+
+    // 边界处理
+    if (self.x < WALL_L + 130 && move < 0) move = 0;
+    if (self.x > WALL_R - 130 && move > 0) move = 0;
+    if (!dodging && (self.x < WALL_L + 70 || self.x > WALL_R - 70)) move = dir;
+    if (move < 0) out.left = true; else if (move > 0) out.right = true;
+
+    // ---------- 3. 普通攻击 ----------
+    const range = self.type === 'sword' ? 124 : 620;
+    if (dist <= range) this.aimT++; else this.aimT = 0;
+    const hittable = opp.onGround && opp.dashT <= 0 && opp.invuln <= 0;
+
+    if (!dodging && dist <= range && self.attackCd <= 0 && self.attackT <= 0 && this.aimT >= p.react) {
+      let fire = false;
+      if (self.type === 'sword') fire = dist <= 108 && opp.invuln <= 0;
+      else fire = hittable || this.level === 'easy';   // 低难度会朝空中乱放
+      if (fire) { out.attack = true; this.aimT = 0; }
+    }
+
+    // ---------- 4. 技能 ----------
+    if (!dodging && !out.attack && self.skillCd <= 0 && self.attackT <= 0 && this.actCd <= 0) {
+      this.actCd = 20;
+      if (Math.random() < p.skillChance) {
+        if (self.type === 'sword') {
+          if (dist > 110 && dist < 250 && hittable) out.skill = true;
+        } else if (hittable && dist > 140 && dist < 640) {
+          out.skill = true;
+        }
+      }
+    }
+
+    return out;
+  }
+}
+
 // ================= 角色 =================
 class Fighter {
   constructor(cfg) {
@@ -252,9 +370,11 @@ class Fighter {
     this.controls = cfg.controls;
     this.startX = cfg.startX;
     this.startFacing = cfg.facing;
-    this.dmg = cfg.type === 'sword' ? 12 : 10;
-    this.knock = cfg.type === 'sword' ? 6.5 : 5;
+    this.dmg = cfg.type === 'sword' ? 12 : 8;
+    this.knock = cfg.type === 'sword' ? 4.5 : 4;
     this.h = 140;
+    this.ai = null;
+    this.dmgMul = 1;      // 人机模式下按难度调整 AI 输出
     this.reset();
   }
   reset() {
@@ -282,15 +402,15 @@ class Fighter {
     if (this.comboT > 0) { this.comboT--; if (this.comboT === 0) this.combo = 0; }
     this.animT++;
 
-    const c = this.controls;
     const canAct = this.hitStun <= 0 && this.dashT <= 0 && gameState === 'fight';
+    const inp = this.getInput(opp);
 
     if (this.hitStun > 0) this.hitStun--;
 
     let moving = 0;
     if (canAct) {
-      if (keys[c.left]) moving -= 1;
-      if (keys[c.right]) moving += 1;
+      if (inp.left) moving -= 1;
+      if (inp.right) moving += 1;
     }
 
     if (this.dashT > 0) {
@@ -301,19 +421,23 @@ class Fighter {
     } else if (canAct) {
       if (this.attackT > 0) {
         this.vx *= 0.86;
-      } else {
-        if (moving !== 0) {
-          this.vx = moving * this.speed;
-          this.facing = moving;
-        } else if (this.onGround) {
-          this.vx *= 0.55;
-        }
+      } else if (moving !== 0) {
+        this.vx = moving * this.speed;
+      } else if (this.onGround) {
+        this.vx *= 0.55;
       }
-      if (consume(c.jump) && this.onGround && this.attackT <= 0) {
+      // 决斗中始终面向对手，出招期间锁定朝向
+      if (this.attackT <= 0) {
+        const d = opp.x - this.x;
+        if (Math.abs(d) > 6) this.facing = d >= 0 ? 1 : -1;
+      }
+      if (inp.jump && this.onGround && this.attackT <= 0) {
         this.vy = -this.jumpPower; this.onGround = false; SFX.jump();
       }
-      if (consume(c.attack) && this.attackCd <= 0 && this.attackT <= 0) this.doAttack();
-      if (consume(c.skill) && this.skillCd <= 0 && this.attackT <= 0) this.doSkill();
+      if (inp.attack && this.attackCd <= 0 && this.attackT <= 0) this.doAttack();
+      if (inp.skill && this.skillCd <= 0 && this.attackT <= 0) this.doSkill();
+    } else if (this.onGround) {
+      this.vx *= 0.88;   // 硬直中给地面摩擦，避免被连续击退一路滑到墙角
     }
 
     // 近战判定
@@ -326,7 +450,7 @@ class Fighter {
     if (this.dashT > 0 && gameState === 'fight') {
       if (!this.hitSet.has(opp) && overlap(this.bodyBox, opp.bodyBox)) {
         this.hitSet.add(opp);
-        hitTarget(opp, this, 22, this.facing * 15, 24, 'dash');
+        hitTarget(opp, this, Math.round(22 * this.dmgMul), this.facing * 15, 24, 'dash');
       }
     }
 
@@ -357,6 +481,16 @@ class Fighter {
     this.ghosts = this.ghosts.filter(g => g.life > 0);
   }
 
+  // 统一输入：AI 返回决策意图，人类玩家读取键盘（边沿触发）
+  getInput(opp) {
+    if (this.ai) return this.ai.think(this, opp, projectiles);
+    const c = this.controls;
+    return {
+      left: !!keys[c.left], right: !!keys[c.right],
+      jump: consume(c.jump), attack: consume(c.attack), skill: consume(c.skill)
+    };
+  }
+
   doAttack() {
     if (this.type === 'sword') {
       this.attackT = this.attackDur;
@@ -365,11 +499,11 @@ class Fighter {
       SFX.slash();
     } else {
       this.attackT = 16;
-      this.attackCd = 26;
+      this.attackCd = 34;
       this.hitSet.clear();
       projectiles.push(new Projectile(
         this.x + this.facing * 34, this.y - 96, this.facing * 13.5, this,
-        { dmg: 10, color: '#6fc6ff', r: 11, life: 95, type: 'bolt' }
+        { dmg: Math.round(this.dmg * this.dmgMul), color: '#6fc6ff', r: 11, life: 95, type: 'bolt' }
       ));
       SFX.shoot();
     }
@@ -385,11 +519,11 @@ class Fighter {
       SFX.dash();
     } else {
       this.attackT = 26;
-      this.skillCd = 200;
+      this.skillCd = 220;
       this.hitSet.clear();
       projectiles.push(new Projectile(
         this.x + this.facing * 40, this.y - 96, this.facing * 10, this,
-        { dmg: 22, color: '#ff9430', r: 21, life: 115, type: 'fire' }
+        { dmg: Math.round(24 * this.dmgMul), color: '#ff9430', r: 21, life: 115, type: 'fire' }
       ));
       SFX.shoot();
     }
@@ -406,7 +540,7 @@ class Fighter {
     if (this.hitSet.has(opp)) return;
     if (overlap(this.meleeBox(), opp.bodyBox)) {
       this.hitSet.add(opp);
-      hitTarget(opp, this, this.dmg, this.facing * this.knock, 16, 'melee');
+      hitTarget(opp, this, Math.round(this.dmg * this.dmgMul), this.facing * this.knock, 16, 'melee');
     }
   }
 }
@@ -791,7 +925,7 @@ function drawHealthBar(f, left) {
   // 技能冷却
   const cdRatio = f.type === 'sword'
     ? clamp(f.skillCd / 165, 0, 1)
-    : clamp(f.skillCd / 200, 0, 1);
+    : clamp(f.skillCd / 220, 0, 1);
   const ix = left ? bx + 6 : bx + bw - 46, iy = by + bh + 62;
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
   roundRect(ix, iy, 40, 40, 8); ctx.fill();
@@ -837,10 +971,20 @@ function drawHUD() {
   ctx.fillStyle = 'rgba(170,190,225,0.5)';
   ctx.fillText('红方：A / D 移动  W 跳  F 普攻  G 冲刺', 56, H - 26);
   ctx.textAlign = 'right';
-  ctx.fillText('蓝方：← / → 移动  ↑ 跳  K 普攻  L 火球', W - 56, H - 26);
+  ctx.fillText(aiLevel
+    ? '蓝方：电脑 AI（' + DIFFS[aiLevel].label + '）'
+    : '蓝方：← / → 移动  ↑ 跳  K 普攻  L 火球', W - 56, H - 26);
   ctx.textAlign = 'center';
   ctx.fillText('Enter 重开   P 暂停   M 静音' + (muted ? '（已静音）' : ''), W / 2, H - 26);
   ctx.textBaseline = 'alphabetic';
+
+  // 人机模式下标注难度
+  if (aiLevel) {
+    ctx.textAlign = 'right';
+    ctx.font = 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = 'rgba(255,209,102,0.9)';
+    ctx.fillText('[ 电脑 · ' + DIFFS[aiLevel].label + ' ]', W - 58, 106);
+  }
 }
 
 // ================= 状态与流程 =================
@@ -851,19 +995,31 @@ let roundResult = null;
 let paused = false;
 const TOTAL_ROUND_TIME = 75 * 60;
 
+// 对战模式：0 = 双人，1-3 = 人机（简单/普通/困难）
+const MENU = [
+  { id: 'pvp',    label: '双人对战',   desc: '两名玩家同屏操作' },
+  { id: 'easy',   label: '人机 · 简单', desc: '反应慢、会失误' },
+  { id: 'normal', label: '人机 · 普通', desc: '会走位与闪避' },
+  { id: 'hard',   label: '人机 · 困难', desc: '反应快、抓破绽' }
+];
+let menuIndex = 0;
+let currentMode = 0;
+let aiLevel = null;
+
 const p1 = new Fighter({
   name: '烈焰剑客', color: '#ff5a5f', color2: '#a81f38', type: 'sword',
-  maxHp: 220, speed: 5.6, jumpPower: 16.5, side: 0, startX: 470, facing: 1,
+  maxHp: 220, speed: 5.9, jumpPower: 16.5, side: 0, startX: 470, facing: 1,
   controls: { left: 'KeyA', right: 'KeyD', jump: 'KeyW', attack: 'KeyF', skill: 'KeyG' }
 });
 const p2 = new Fighter({
   name: '秘法星灵', color: '#4fa8ff', color2: '#1b4f9e', type: 'mage',
-  maxHp: 200, speed: 5.0, jumpPower: 16.5, side: 1, startX: 810, facing: -1,
+  maxHp: 200, speed: 4.7, jumpPower: 16.5, side: 1, startX: 810, facing: -1,
   controls: { left: 'ArrowLeft', right: 'ArrowRight', jump: 'ArrowUp', attack: 'KeyK', skill: 'KeyL' }
 });
 
 function startRound() {
   p1.reset(); p2.reset();
+  if (p2.ai) p2.ai.reset();
   projectiles = []; particles = []; floaters = [];
   roundTime = TOTAL_ROUND_TIME;
   roundResult = null;
@@ -871,9 +1027,30 @@ function startRound() {
   stateT = 0;
   paused = false;
 }
-function startMatch() {
+function startMatch(modeIdx) {
+  if (modeIdx === undefined) modeIdx = currentMode;
+  currentMode = modeIdx;
+  aiLevel = modeIdx === 0 ? null : MENU[modeIdx].id;
+  p2.ai = aiLevel ? new EnemyAI(aiLevel) : null;
+  p2.dmgMul = aiLevel ? DIFFS[aiLevel].dmg : 1;
   wins = [0, 0]; round = 1;
   startRound();
+}
+
+// 身体碰撞：把重叠的两人沿 X 轴分开，避免互相穿过
+function resolveBodyCollision() {
+  const a = p1.bodyBox, b = p2.bodyBox;
+  if (a.y + a.h < b.y || b.y + b.h < a.y) return;   // 一方已跳到另一方头顶，不阻挡
+  const ox = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  if (ox <= 0) return;
+  const dir = p1.x <= p2.x ? 1 : -1;
+  // 靠墙的一方推不动时，把余量转移给另一方
+  const room1 = dir > 0 ? p1.x - WALL_L : WALL_R - p1.x;
+  const room2 = dir > 0 ? WALL_R - p2.x : p2.x - WALL_L;
+  const move1 = clamp(ox / 2, 0, room1);
+  const move2 = clamp(ox - move1, 0, room2);
+  p1.x -= dir * move1;
+  p2.x += dir * move2;
 }
 
 function updateProjectiles() {
@@ -884,8 +1061,8 @@ function updateProjectiles() {
     if (gameState === 'fight' && !pr.dead &&
         circleRect(pr.x, pr.y, pr.r, target.bodyBox) && target.invuln <= 0) {
       pr.dead = true;
-      hitTarget(target, pr.owner, pr.dmg, sign(pr.vx) * (pr.type === 'fire' ? 15 : 9),
-        pr.type === 'fire' ? 24 : 10, pr.type === 'fire' ? 'fire' : 'bolt');
+      hitTarget(target, pr.owner, pr.dmg, sign(pr.vx) * (pr.type === 'fire' ? 8 : 4),
+        pr.type === 'fire' ? 16 : 7, pr.type === 'fire' ? 'fire' : 'bolt');
     }
   }
   projectiles = projectiles.filter(p => !p.dead);
@@ -897,12 +1074,19 @@ function fixedUpdate() {
   if (consume('KeyM')) muted = !muted;
 
   if (gameState === 'menu') {
-    if (consume('Enter') || consume('Space')) startMatch();
+    const before = menuIndex;
+    if (consume('KeyW') || consume('ArrowUp')) menuIndex = (menuIndex + MENU.length - 1) % MENU.length;
+    if (consume('KeyS') || consume('ArrowDown')) menuIndex = (menuIndex + 1) % MENU.length;
+    for (let i = 0; i < MENU.length; i++) {
+      if (consume('Digit' + (i + 1)) || consume('Numpad' + (i + 1))) menuIndex = i;
+    }
+    if (menuIndex !== before) SFX.nav();
+    if (consume('Enter') || consume('Space')) { startMatch(menuIndex); SFX.go(); }
     clearPressed(); return;
   }
   if (gameState === 'gameover') {
     updateParticles(); updateFloaters();
-    if (consume('Enter') || consume('Space')) { gameState = 'menu'; stateT = 0; }
+    if (consume('Enter') || consume('Space')) { gameState = 'menu'; stateT = 0; menuIndex = currentMode; }
     clearPressed(); return;
   }
   if (consume('KeyR')) { startMatch(); clearPressed(); return; }
@@ -922,6 +1106,7 @@ function fixedUpdate() {
   if (gameState === 'fight') {
     roundTime--;
     p1.update(p2); p2.update(p1);
+    resolveBodyCollision();
     updateProjectiles();
     updateParticles(); updateFloaters();
     if (roundTime <= 0) timeOut();
@@ -931,6 +1116,7 @@ function fixedUpdate() {
   if (gameState === 'roundover') {
     stateT++;
     p1.update(p2); p2.update(p1);
+    resolveBodyCollision();
     updateProjectiles(); updateParticles(); updateFloaters();
     if (stateT >= 150) {
       if (wins[0] >= 2 || wins[1] >= 2) { gameState = 'gameover'; stateT = 0; SFX.win(); }
@@ -1039,11 +1225,11 @@ function drawMenu() {
   // 标题
   const pulse = 0.5 + 0.5 * Math.sin(time * 0.04);
   ctx.save();
-  ctx.translate(W / 2, 168);
-  ctx.font = 'bold 112px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.translate(W / 2, 116);
+  ctx.font = 'bold 96px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.lineWidth = 14; ctx.strokeStyle = 'rgba(0,0,0,.6)';
   ctx.strokeText('王者对决', 0, 0);
-  const tg = ctx.createLinearGradient(0, -60, 0, 60);
+  const tg = ctx.createLinearGradient(0, -50, 0, 50);
   tg.addColorStop(0, '#fff6d5');
   tg.addColorStop(0.5, '#ffd166');
   tg.addColorStop(1, '#ff9a3c');
@@ -1051,24 +1237,23 @@ function drawMenu() {
   ctx.fillText('王者对决', 0, 0);
   ctx.restore();
 
-  ctx.font = 'bold 24px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 22px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(180,205,255,' + (0.6 + pulse * 0.4) + ')';
-  ctx.fillText('2D  双 人 对 战', W / 2, 246);
+  ctx.fillText('2D  双 人 对 战', W / 2, 182);
 
   // 两位英雄卡片
   const drawCard = (f, cx) => {
     ctx.save();
-    ctx.fillStyle = 'rgba(12,16,34,0.82)';
-    roundRect(cx - 200, 300, 400, 240, 16); ctx.fill();
+    ctx.fillStyle = 'rgba(12,16,34,0.85)';
+    roundRect(cx - 190, 214, 380, 176, 16); ctx.fill();
     ctx.strokeStyle = f.color; ctx.lineWidth = 3;
-    roundRect(cx - 200, 300, 400, 240, 16); ctx.stroke();
+    roundRect(cx - 190, 214, 380, 176, 16); ctx.stroke();
 
     // 头像
     ctx.save();
-    ctx.translate(cx - 120, 430);
-    ctx.scale(1.15, 1.15);
-    ctx.translate(0, 0);
-    // 简化人像
+    ctx.translate(cx - 128, 300);
+    ctx.scale(0.92, 0.92);
     ctx.fillStyle = f.color;
     roundRect(-19, -34, 38, 58, 13); ctx.fill();
     limb(-9, 20, -12, 62, 14, f.color2);
@@ -1080,35 +1265,56 @@ function drawMenu() {
     ctx.restore();
 
     ctx.textAlign = 'left';
-    ctx.font = 'bold 32px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.font = 'bold 30px "PingFang SC","Microsoft YaHei",sans-serif';
     ctx.fillStyle = f.color;
-    ctx.fillText(f.name, cx - 50, 366);
+    ctx.fillText(f.name, cx - 58, 252);
 
-    ctx.font = '18px "PingFang SC","Microsoft YaHei",sans-serif';
-    ctx.fillStyle = 'rgba(200,215,245,0.85)';
     const isSword = f.type === 'sword';
     const lines = isSword
-      ? ['定位：近战刺客', 'A / D 移动 · W 跳跃', 'F 剑气普攻', 'G 冲刺斩（无敌突进）']
-      : ['定位：远程法师', '← / → 移动 · ↑ 跳跃', 'K 魔法弹（远程）', 'L 爆裂火球（高伤）'];
+      ? ['近战刺客 · 高机动', 'A / D 移动 · W 跳跃', 'F 剑气 · G 冲刺斩']
+      : ['远程法师 · 高爆发', '← / → 移动 · ↑ 跳跃', 'K 魔法弹 · L 爆裂火球'];
+    ctx.font = '16px "PingFang SC","Microsoft YaHei",sans-serif';
     lines.forEach((ln, i) => {
-      ctx.fillStyle = i === 0 ? 'rgba(255,209,102,0.95)' : 'rgba(200,215,245,0.85)';
-      ctx.fillText(ln, cx - 50, 404 + i * 32);
+      ctx.fillStyle = i === 0 ? 'rgba(255,209,102,0.92)' : 'rgba(200,215,245,0.82)';
+      ctx.fillText(ln, cx - 58, 292 + i * 30);
     });
     ctx.restore();
   };
-  drawCard(p1, W / 2 - 250);
-  drawCard(p2, W / 2 + 250);
+  drawCard(p1, W / 2 - 205);
+  drawCard(p2, W / 2 + 205);
 
-  // 开始提示
+  // 模式选择
+  MENU.forEach((o, i) => {
+    const y = 452 + i * 44;
+    const sel = i === menuIndex;
+    if (sel) {
+      ctx.fillStyle = 'rgba(255,209,102,0.14)';
+      roundRect(W / 2 - 280, y - 21, 560, 42, 10); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,209,102,0.85)'; ctx.lineWidth = 2;
+      roundRect(W / 2 - 280, y - 21, 560, 42, 10); ctx.stroke();
+      ctx.fillStyle = '#ffd166';
+      ctx.beginPath();
+      ctx.moveTo(W / 2 - 266, y - 9); ctx.lineTo(W / 2 - 254, y); ctx.lineTo(W / 2 - 266, y + 9);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 24px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = sel ? '#ffd166' : 'rgba(200,215,245,0.72)';
+    ctx.fillText(o.label, W / 2 - 244, y);
+    ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = sel ? 'rgba(235,242,255,0.9)' : 'rgba(150,170,210,0.55)';
+    ctx.fillText(o.desc, W / 2 + 34, y + 1);
+  });
+
   ctx.textAlign = 'center';
-  const a = 0.5 + 0.5 * Math.sin(time * 0.08);
-  ctx.font = 'bold 34px "PingFang SC","Microsoft YaHei",sans-serif';
-  ctx.fillStyle = 'rgba(255,255,255,' + (0.5 + a * 0.5) + ')';
-  ctx.fillText('按  Enter  开始对战', W / 2, 612);
-
-  ctx.font = '18px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.font = '16px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(160,180,220,0.7)';
-  ctx.fillText('三局两胜 · 60 秒 / 回合 · 同屏双人', W / 2, 660);
+  ctx.fillText('W / S 或 ↑ / ↓ 切换模式    ·    数字键 1-4 直选', W / 2, 645);
+
+  const a = 0.5 + 0.5 * Math.sin(time * 0.08);
+  ctx.font = 'bold 26px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,' + (0.45 + a * 0.55) + ')';
+  ctx.fillText('按  Enter  开始对战', W / 2, 688);
   ctx.textBaseline = 'alphabetic';
 }
 
