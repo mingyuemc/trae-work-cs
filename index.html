@@ -578,6 +578,52 @@ const COMBO_TIERS = [
   { min: 2,  name: '连击', color: '#ffffff' }
 ];
 
+// ================= 技能升级（回合间选卡，双方各自成长） =================
+// tier: 1 普通 / 2 稀有 / 3 史诗，仅影响卡面配色
+const TIER_STYLE = {
+  1: { color: '#6fc6ff', label: '普通' },
+  2: { color: '#c08bff', label: '稀有' },
+  3: { color: '#ffd166', label: '史诗' }
+};
+const UPGRADES = [
+  { id: 'cd', name: '疾风刻印', tier: 2, desc: '所有技能冷却 -15%',
+    apply(f) { f.mods.cd = Math.max(0.4, f.mods.cd * 0.85); } },
+  { id: 'power', name: '烈焰铭文', tier: 2, desc: '技能伤害 +20%',
+    apply(f) { f.mods.power += 0.20; } },
+  { id: 'range', name: '扩张法阵', tier: 1, desc: '技能范围 +18%',
+    apply(f) { f.mods.range += 0.18; } },
+  { id: 's0', name: '精通·一技能', tier: 2,
+    desc: f => '「' + f.skills[0].label + '」伤害 +30%、冷却 -10%',
+    apply(f) { f.mods.skillPower[0] += 0.30; f.mods.skillCd[0] = Math.max(0.4, f.mods.skillCd[0] * 0.9); } },
+  { id: 's1', name: '精通·二技能', tier: 2,
+    desc: f => '「' + f.skills[1].label + '」伤害 +35%',
+    apply(f) { f.mods.skillPower[1] += 0.35; } },
+  { id: 's1cd', name: '急速·二技能', tier: 2,
+    desc: f => '「' + f.skills[1].label + '」冷却 -25%',
+    apply(f) { f.mods.skillCd[1] = Math.max(0.4, f.mods.skillCd[1] * 0.75); } },
+  { id: 'atk', name: '利刃共鸣', tier: 1, desc: '普通攻击伤害 +18%',
+    apply(f) { f.mods.atk += 0.18; } },
+  { id: 'speed', name: '疾行战靴', tier: 1, desc: '移动速度 +12%',
+    apply(f) { f.mods.speed += 0.12; } },
+  { id: 'vital', name: '不灭战意', tier: 1, desc: '最大生命 +45 并立即回复',
+    apply(f) { f.hpBonus += 45; f.maxHp += 45; f.hp = Math.min(f.maxHp, f.hp + 45); } },
+  { id: 'lifesteal', name: '嗜血', tier: 3, desc: '造成伤害的 12% 转化为治疗',
+    apply(f) { f.mods.lifesteal += 0.12; } },
+  { id: 'finisher', name: '破军', tier: 3, desc: '连招收招（第三段）伤害 +45%',
+    apply(f) { f.mods.finisher += 0.45; } }
+];
+const UPGRADE_MAX = 3;   // 同一张卡最多叠加次数
+
+// 随机抽取 3 张互不相同、且未叠满的升级卡
+function rollUpgrades(f) {
+  const bag = UPGRADES.filter(u => (f.upgradeCounts[u.id] || 0) < UPGRADE_MAX);
+  const out = [];
+  while (out.length < 3 && bag.length) {
+    out.push(bag.splice(Math.floor(Math.random() * bag.length), 1)[0]);
+  }
+  return out;
+}
+
 // ================= 角色 =================
 class Fighter {
   constructor(cfg) {
@@ -597,13 +643,32 @@ class Fighter {
     this.h = 140;
     this.ai = null;
     this.dmgMul = 1;      // 人机模式下按难度调整 AI 输出
+    this.baseMaxHp = cfg.maxHp;
     this.skills = SKILLS[cfg.type];
+    this.resetMods();     // 强化加成（每场对局重新分配）
     this.reset();
+  }
+  // 强化：每场对局开始时清空，回合间选卡累计
+  resetMods() {
+    this.hpBonus = 0;
+    this.mods = {
+      cd: 1, power: 1, atk: 1, range: 1, speed: 1,   // 全局倍率
+      lifesteal: 0, finisher: 1,                      // 吸血比例 / 收招倍率
+      skillPower: [1, 1], skillCd: [1, 1]             // 各技能独立的伤害 / 冷却倍率
+    };
+    this.upgrades = [];
+    this.upgradeCounts = {};
+  }
+  applyUpgrade(up) {
+    up.apply(this);
+    this.upgrades.push(up.id);
+    this.upgradeCounts[up.id] = (this.upgradeCounts[up.id] || 0) + 1;
   }
   reset() {
     this.x = this.startX; this.y = GROUND;
     this.vx = 0; this.vy = 0;
     this.facing = this.startFacing;
+    this.maxHp = this.baseMaxHp + this.hpBonus;
     this.hp = this.maxHp; this.hpDisplay = this.maxHp;
     this.onGround = true;
     this.animT = 0;
@@ -656,7 +721,7 @@ class Fighter {
       if (this.attackT > 0) {
         this.vx *= 0.86;
       } else if (moving !== 0) {
-        this.vx = moving * this.speed;
+        this.vx = moving * this.speed * this.mods.speed;
       } else if (this.onGround) {
         this.vx *= 0.55;
       }
@@ -689,7 +754,7 @@ class Fighter {
         this.whirlTick = 11;
         const b = this.meleeBox(150, 150);
         if (overlap(b, opp.bodyBox) && opp.invuln <= 0) {
-          hitTarget(opp, this, Math.round(this.dmg * 1.1 * this.dmgMul), this.facing * 3.5, 12, 'whirl');
+          hitTarget(opp, this, Math.round(this.dmg * 1.1 * this.mods.power * this.mods.skillPower[1] * this.dmgMul), this.facing * 3.5, 12, 'whirl');
           spawnHit(opp.x, opp.y - 92, 'whirl');
         }
       }
@@ -699,7 +764,7 @@ class Fighter {
     if (this.dashT > 0 && gameState === 'fight') {
       if (!this.hitSet.has(opp) && overlap(this.bodyBox, opp.bodyBox)) {
         this.hitSet.add(opp);
-        hitTarget(opp, this, Math.round(22 * this.dmgMul), this.facing * 15, 24, 'dash');
+        hitTarget(opp, this, Math.round(22 * this.mods.power * this.mods.skillPower[0] * this.dmgMul), this.facing * 15, 24, 'dash');
       }
     }
 
@@ -760,8 +825,8 @@ class Fighter {
       this.hitSet.clear();
       projectiles.push(new Projectile(
         this.x + this.facing * 34, this.y - 96, this.facing * (fin ? 17 : 13.5), this, {
-          dmg: Math.round(this.dmg * (fin ? 1.8 : 1) * this.dmgMul),
-          color: fin ? '#ffd0ff' : '#6fc6ff', r: fin ? 16 : 11, life: 95, type: 'bolt'
+          dmg: Math.round(this.dmg * (fin ? 1.8 * this.mods.finisher : 1) * this.mods.atk * this.dmgMul),
+          color: fin ? '#ffd0ff' : '#6fc6ff', r: Math.round((fin ? 16 : 11) * this.mods.range), life: 95, type: 'bolt'
         }
       ));
       SFX.shoot();
@@ -786,7 +851,7 @@ class Fighter {
       this.hitSet.clear();
       projectiles.push(new Projectile(
         this.x + this.facing * 40, this.y - 96, this.facing * 10, this,
-        { dmg: Math.round(24 * this.dmgMul), color: '#ff9430', r: 21, life: 115, type: 'fire' }
+        { dmg: Math.round(24 * this.mods.power * this.mods.skillPower[0] * this.dmgMul), color: '#ff9430', r: Math.round(21 * this.mods.range), life: 115, type: 'fire' }
       ));
       SFX.shoot();
     } else if (sk.id === 'nova') {
@@ -795,16 +860,17 @@ class Fighter {
       SFX.nova();
       shake(9);
       // 以自身为中心的范围爆发：命中则击飞，用来反打贴脸的敌人
-      const b = { x: this.x - 150, y: this.y - 190, w: 300, h: 190 };
+      const rx = 150 * this.mods.range, ry = 190 * this.mods.range;
+      const b = { x: this.x - rx, y: this.y - ry, w: rx * 2, h: ry };
       if (overlap(b, opp.bodyBox) && opp.invuln <= 0) {
-        hitTarget(opp, this, Math.round(16 * this.dmgMul), sign(opp.x - this.x) * 9, 22, 'nova', -14);
+        hitTarget(opp, this, Math.round(16 * this.mods.power * this.mods.skillPower[1] * this.dmgMul), sign(opp.x - this.x) * 9, 22, 'nova', -14);
       }
     }
-    this.cds[i] = sk.cd;
+    this.cds[i] = Math.max(30, Math.round(sk.cd * this.mods.cd * this.mods.skillCd[i]));
   }
 
   meleeBox(w, h) {
-    w = w || 92; h = h || 118;
+    w = (w || 92) * this.mods.range; h = (h || 118) * this.mods.range;
     const x = this.facing > 0 ? this.x + 6 : this.x - 6 - w;
     return { x: x, y: this.y - 132, w: w, h: h };
   }
@@ -818,10 +884,10 @@ class Fighter {
       this.hitSet.add(opp);
       if (fin) {
         // 收招：高伤 + 击飞，可接后续连段
-        hitTarget(opp, this, Math.round(this.dmg * 1.6 * this.dmgMul), this.facing * 11, 26, 'dash', -13);
+        hitTarget(opp, this, Math.round(this.dmg * 1.6 * this.mods.finisher * this.mods.atk * this.dmgMul), this.facing * 11, 26, 'dash', -13);
         shake(11);
       } else {
-        hitTarget(opp, this, Math.round(this.dmg * this.dmgMul), this.facing * this.knock, 16, 'melee');
+        hitTarget(opp, this, Math.round(this.dmg * this.mods.atk * this.dmgMul), this.facing * this.knock, 16, 'melee');
       }
     }
   }
@@ -845,6 +911,16 @@ function hitTarget(target, attacker, dmg, knockX, stun, kind, knockY) {
   target.whirlT = 0;
   target.flash = 9;
   if (attacker) { attacker.combo++; attacker.comboT = 100; }
+
+  // 嗜血：按实际伤害回复自身
+  if (attacker && attacker.mods && attacker.mods.lifesteal > 0 && attacker.hp < attacker.maxHp) {
+    const heal = Math.max(1, Math.round(dmg * attacker.mods.lifesteal));
+    attacker.hp = Math.min(attacker.maxHp, attacker.hp + heal);
+    floaters.push({
+      x: attacker.x + rand(-10, 10), y: attacker.y - 150,
+      text: '+' + heal, vy: -0.9, life: 34, color: '#7cffa0'
+    });
+  }
 
   spawnHit(target.x, target.y - 92, kind);
   const heavyHit = kind === 'dash' || kind === 'fire' || kind === 'nova' || kind === 'whirl';
@@ -1231,6 +1307,14 @@ function drawHealthBar(f, left) {
   ctx.fillStyle = '#eaf0ff';
   ctx.fillText(f.name, left ? bx + 2 : bx + bw - 2, by + bh + 24);
 
+  // 已强化数量（显示在名字行的对侧）
+  if (f.upgrades && f.upgrades.length) {
+    ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = '#ffd166';
+    ctx.textAlign = left ? 'right' : 'left';
+    ctx.fillText('强化 +' + f.upgrades.length, left ? bx + bw - 2 : bx + 2, by + bh + 24);
+  }
+
   // 血量数值
   ctx.font = 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(210,225,255,0.75)';
@@ -1336,6 +1420,10 @@ let stateT = 0, time = 0;
 let wins = [0, 0], round = 1, roundTime = 75 * 60;
 let roundResult = null;
 let paused = false;
+// 回合间强化选卡
+let upgradePhase = 0;          // 0 = 玩家1 选择，1 = 玩家2 选择
+let upgradeSel = 0;            // 当前高亮的卡
+let upgradeChoices = [[], []]; // 双方各自的 3 张候选卡
 const TOTAL_ROUND_TIME = 75 * 60;
 
 // 对战模式：0 = 双人，1-3 = 人机（简单/普通/困难）
@@ -1376,11 +1464,34 @@ function startMatch(modeIdx) {
   aiLevel = modeIdx === 0 ? null : MENU[modeIdx].id;
   p2.ai = aiLevel ? new EnemyAI(aiLevel) : null;
   p2.dmgMul = aiLevel ? DIFFS[aiLevel].dmg : 1;
+  p1.resetMods(); p2.resetMods();   // 新对局：清空双方强化
   wins = [0, 0]; round = 1;
   Music.duck = 1;
   Music.play('battle');   // 进入对战：切换到战斗曲
   Music.apply(0.3);
   startRound();
+}
+
+// 进入回合间的强化选卡阶段：双方各自获得一组候选卡
+function beginUpgrade() {
+  gameState = 'upgrade';
+  stateT = 0;
+  upgradePhase = 0;
+  upgradeSel = 0;
+  upgradeChoices = [rollUpgrades(p1), rollUpgrades(p2)];
+}
+
+// 当前选择者确认一张卡，随后交给下一位（或开始下一回合）
+function commitUpgrade() {
+  const chooser = upgradePhase === 0 ? p1 : p2;
+  const card = upgradeChoices[upgradePhase][upgradeSel];
+  if (!card) return;
+  chooser.applyUpgrade(card);
+  SFX.ready();
+  upgradePhase++;
+  upgradeSel = 0;
+  stateT = 0;
+  if (upgradePhase >= 2) { round++; startRound(); }
 }
 
 // 身体碰撞：把重叠的两人沿 X 轴分开，避免互相穿过
@@ -1436,6 +1547,25 @@ function fixedUpdate() {
     if (consume('Enter') || consume('Space')) { gameState = 'menu'; stateT = 0; menuIndex = currentMode; }
     clearPressed(); return;
   }
+  if (gameState === 'upgrade') {
+    stateT++;
+    const chooser = upgradePhase === 0 ? p1 : p2;
+    const cards = upgradeChoices[upgradePhase];
+    if (chooser.ai) {
+      // 电脑自动挑选：稍作停顿，让玩家看清它拿了什么
+      if (stateT >= 50) { upgradeSel = Math.floor(Math.random() * cards.length); commitUpgrade(); }
+    } else {
+      const prev = consume(upgradePhase === 0 ? 'KeyA' : 'ArrowLeft');
+      const next = consume(upgradePhase === 0 ? 'KeyD' : 'ArrowRight');
+      const ok = upgradePhase === 0
+        ? (consume('KeyF') || consume('Enter'))
+        : (consume('KeyK') || consume('Space'));
+      if (prev) { upgradeSel = (upgradeSel + cards.length - 1) % cards.length; SFX.nav(); }
+      if (next) { upgradeSel = (upgradeSel + 1) % cards.length; SFX.nav(); }
+      if (ok) commitUpgrade();
+    }
+    clearPressed(); return;
+  }
   if (consume('KeyR')) { startMatch(); clearPressed(); return; }
   if (consume('KeyP')) { paused = !paused; Music.duck = paused ? 0.3 : 1; Music.apply(0.25); }
   if (paused) { clearPressed(); return; }
@@ -1470,7 +1600,7 @@ function fixedUpdate() {
         gameState = 'gameover'; stateT = 0;
         Music.stop(); playVictory();   // 决出胜负：停战斗曲，吹胜利号角
       }
-      else { round++; startRound(); }
+      else { beginUpgrade(); }
     }
     clearPressed(); return;
   }
@@ -1555,6 +1685,118 @@ function drawRoundOver() {
   ctx.fillStyle = 'rgba(220,232,255,0.85)';
   ctx.fillText('比分  ' + wins[0] + ' : ' + wins[1], W / 2, H / 2 + 110);
   ctx.globalAlpha = 1;
+  ctx.textBaseline = 'alphabetic';
+}
+
+// 回合间的技能强化选卡界面
+function wrapText(text, maxW) {
+  // 以“连续数字/字母/符号”为整体换行，避免把 45% 之类拆开
+  const tokens = text.match(/[A-Za-z0-9%.+\-]+|./g) || [];
+  const lines = [];
+  let cur = '';
+  for (const tk of tokens) {
+    const test = cur + tk;
+    if (cur && ctx.measureText(test).width > maxW) { lines.push(cur); cur = tk; }
+    else cur = test;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+function drawUpgrade() {
+  ctx.fillStyle = 'rgba(5,7,16,0.85)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+  const chooser = upgradePhase === 0 ? p1 : p2;
+  const cards = upgradeChoices[upgradePhase];
+
+  // 标题
+  ctx.font = 'bold 52px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.lineWidth = 10; ctx.strokeStyle = 'rgba(0,0,0,.6)';
+  ctx.strokeText('技 能 强 化', W / 2, 96);
+  const hg = ctx.createLinearGradient(0, 70, 0, 120);
+  hg.addColorStop(0, '#ffffff'); hg.addColorStop(1, '#ffd166');
+  ctx.fillStyle = hg;
+  ctx.fillText('技 能 强 化', W / 2, 96);
+
+  // 副标题：当前由谁选择
+  ctx.font = 'bold 26px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = chooser.color;
+  ctx.fillText(chooser.ai ? ('电脑 ' + chooser.name + ' 正在挑选…') : (chooser.name + '，请选择一项强化'), W / 2, 158);
+
+  // 操作提示
+  ctx.font = 'bold 20px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(200,215,255,0.7)';
+  const hint = chooser.ai ? '电脑将随机选择一张'
+    : upgradePhase === 0 ? 'A / D 切换　　F 确认' : '← / → 切换　　K 确认';
+  ctx.fillText(hint, W / 2, 196);
+
+  // 卡牌
+  const cw = 320, ch = 340, gap = 40;
+  const totalW = cards.length * cw + Math.max(0, cards.length - 1) * gap;
+  const x0 = (W - totalW) / 2, y0 = 252;
+  for (let i = 0; i < cards.length; i++) {
+    const card = cards[i];
+    const sel = i === upgradeSel;
+    const st = TIER_STYLE[card.tier] || TIER_STYLE[1];
+    const cx = x0 + i * (cw + gap), cy = y0, mid = cx + cw / 2;
+
+    ctx.save();
+    if (sel) {
+      ctx.translate(mid, cy + ch / 2); ctx.scale(1.05, 1.05); ctx.translate(-mid, -(cy + ch / 2));
+    }
+    // 卡底
+    const bgGrad = ctx.createLinearGradient(0, cy, 0, cy + ch);
+    bgGrad.addColorStop(0, sel ? 'rgba(38,44,78,0.98)' : 'rgba(20,24,46,0.96)');
+    bgGrad.addColorStop(1, 'rgba(12,15,30,0.98)');
+    ctx.fillStyle = bgGrad;
+    roundRect(cx, cy, cw, ch, 16); ctx.fill();
+    // 选中光晕 + 边框
+    if (sel) {
+      ctx.save();
+      ctx.shadowColor = st.color; ctx.shadowBlur = 34;
+      ctx.strokeStyle = st.color; ctx.lineWidth = 3;
+      roundRect(cx, cy, cw, ch, 16); ctx.stroke();
+      ctx.restore();
+    } else {
+      ctx.strokeStyle = 'rgba(120,150,220,0.35)'; ctx.lineWidth = 2;
+      roundRect(cx, cy, cw, ch, 16); ctx.stroke();
+    }
+    // 稀有度
+    ctx.font = 'bold 16px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = st.color;
+    ctx.fillText('★ ' + st.label, mid, cy + 36);
+    // 卡名
+    ctx.font = 'bold 30px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = '#f2f6ff';
+    ctx.fillText(card.name, mid, cy + 94);
+    // 分隔线
+    ctx.strokeStyle = 'rgba(140,170,240,0.25)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx + 28, cy + 124); ctx.lineTo(cx + cw - 28, cy + 124); ctx.stroke();
+    // 描述
+    ctx.font = '21px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = 'rgba(214,226,255,0.92)';
+    const text = typeof card.desc === 'function' ? card.desc(chooser) : card.desc;
+    let ly = cy + 168;
+    for (const ln of wrapText(text, cw - 56)) { ctx.fillText(ln, mid, ly); ly += 32; }
+    // 已叠层数
+    const got = chooser.upgradeCounts[card.id] || 0;
+    if (got > 0) {
+      ctx.font = 'bold 15px "PingFang SC",sans-serif';
+      ctx.fillStyle = 'rgba(255,209,102,0.85)';
+      ctx.fillText('已强化 ×' + got, mid, cy + ch - 32);
+    }
+    ctx.restore();
+  }
+
+  // 底部：双方累计强化概览
+  ctx.font = 'bold 20px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = p1.color;
+  ctx.fillText(p1.name + '　已强化 ' + p1.upgrades.length + ' 项', 60, H - 40);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = p2.color;
+  ctx.fillText(p2.name + '　已强化 ' + p2.upgrades.length + ' 项', W - 60, H - 40);
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -1762,6 +2004,7 @@ function render() {
 
   if (gameState === 'countdown') drawCountdown();
   if (gameState === 'roundover') drawRoundOver();
+  if (gameState === 'upgrade') drawUpgrade();
   if (gameState === 'gameover') drawGameOver();
   if (paused && (gameState === 'fight' || gameState === 'countdown' || gameState === 'roundover')) drawPaused();
 }
