@@ -150,6 +150,10 @@ const SFX = {
   land()  { tone(140, 0.14, 'sine', 0.07, 60); noiseHit(0.08, 0.04, 700); },
   boom()  { tone(130, 0.3, 'sawtooth', 0.11, 45); noiseHit(0.22, 0.07, 500); },
   ko()    { tone(170, 0.5, 'sawtooth', 0.1, 55); noiseHit(0.3, 0.06, 400); },
+  heavy() { tone(180, 0.22, 'sawtooth', 0.11, 70); tone(560, 0.1, 'square', 0.05, 200); noiseHit(0.16, 0.07, 1100); },
+  whirl() { tone(340, 0.42, 'sawtooth', 0.08, 880); noiseHit(0.38, 0.05, 1600); },
+  nova()  { tone(1250, 0.34, 'sine', 0.09, 320); tone(760, 0.3, 'triangle', 0.06, 1600); noiseHit(0.28, 0.05, 2600); },
+  ready() { tone(1180, 0.08, 'sine', 0.045, 1500); },
   nav()   { tone(600, 0.06, 'square', 0.05); },
   count() { tone(680, 0.12, 'sine', 0.07); },
   go()    { tone(880, 0.28, 'sine', 0.09, 1250); }
@@ -309,9 +313,11 @@ let shakeT = 0, shakeMag = 0;
 function shake(m) { shakeMag = Math.max(shakeMag, m); shakeT = 14; }
 
 function spawnHit(x, y, kind) {
-  const n = kind === 'fire' ? 30 : 16;
+  const n = kind === 'fire' ? 30 : kind === 'nova' || kind === 'whirl' ? 22 : 16;
   const cols = kind === 'fire' ? ['#ffb03a', '#ff6a00', '#ffe08a', '#ff3d00']
     : kind === 'dash' ? ['#ffd166', '#fff2b0', '#ff9a3c']
+    : kind === 'whirl' ? ['#ffb03a', '#ff7a2f', '#fff3c4']
+    : kind === 'nova' ? ['#a8f0ff', '#5fd8ff', '#ffffff', '#c8b6ff']
     : ['#ffffff', '#ffd166', '#ff5d73'];
   for (let i = 0; i < n; i++) {
     const a = rand(0, TAU), sp = rand(1.5, 7);
@@ -322,7 +328,10 @@ function spawnHit(x, y, kind) {
     });
   }
   // 冲击环
-  particles.push({ ring: true, x, y, r0: 6, r1: kind === 'fire' ? 70 : 48, life: 16, max: 16, color: cols[0] });
+  particles.push({
+    ring: true, x, y, life: 16, max: 16, color: cols[0],
+    r0: 6, r1: kind === 'fire' ? 70 : kind === 'nova' ? 120 : 48
+  });
 }
 function updateParticles() {
   for (const p of particles) {
@@ -445,7 +454,7 @@ class EnemyAI {
   // 返回一个与人类输入同构的意图对象
   think(self, opp, prs) {
     const p = this.p;
-    const out = { left: false, right: false, jump: false, attack: false, skill: false };
+    const out = { left: false, right: false, jump: false, attack: false, skills: [false, false] };
     this.t++;
     if (this.reactCd > 0) this.reactCd--;
     if (this.actCd > 0) this.actCd--;
@@ -468,8 +477,8 @@ class EnemyAI {
     if (self.onGround && this.reactCd <= 0 && threatDist < 340) {
       this.reactCd = 5;
       if (Math.random() < p.dodge) {
-        if (self.type === 'sword' && self.skillCd <= 0 && threatDist < 240) {
-          out.skill = true;         // 剑客用无敌冲刺穿过去
+        if (self.type === 'sword' && self.cds[0] <= 0 && threatDist < 240) {
+          out.skills[0] = true;     // 剑客用无敌冲刺穿过去
         } else {
           out.jump = true;          // 法师起跳躲弹道
         }
@@ -523,13 +532,21 @@ class EnemyAI {
     }
 
     // ---------- 4. 技能 ----------
-    if (!dodging && !out.attack && self.skillCd <= 0 && self.attackT <= 0 && this.actCd <= 0) {
+    if (!dodging && !out.attack && self.attackT <= 0 && this.actCd <= 0) {
       this.actCd = 20;
-      if (Math.random() < p.skillChance) {
-        if (self.type === 'sword') {
-          if (dist > 110 && dist < 250 && hittable) out.skill = true;
-        } else if (hittable && dist > 140 && dist < 640) {
-          out.skill = true;
+      if (self.type === 'sword') {
+        // 旋风斩：贴身后用来压制
+        if (self.cds[1] <= 0 && dist < 130 && hittable && Math.random() < p.skillChance * 0.8) {
+          out.skills[1] = true;
+        } else if (self.cds[0] <= 0 && dist > 110 && dist < 250 && hittable && Math.random() < p.skillChance) {
+          out.skills[0] = true;
+        }
+      } else {
+        // 寒霜新星：被贴脸时反打
+        if (self.cds[1] <= 0 && dist < 200 && hittable && Math.random() < p.skillChance * 0.7) {
+          out.skills[1] = true;
+        } else if (self.cds[0] <= 0 && hittable && dist > 140 && dist < 640 && Math.random() < p.skillChance) {
+          out.skills[0] = true;
         }
       }
     }
@@ -537,6 +554,29 @@ class EnemyAI {
     return out;
   }
 }
+
+// ================= 技能表 =================
+// 每个英雄两个技能，各自独立冷却。id 决定实际效果（见 Fighter.castSkill）
+const SKILLS = {
+  sword: [
+    { id: 'dash',  key: 'KeyG', label: '冲刺斩',   cd: 165 },
+    { id: 'whirl', key: 'KeyH', label: '烈焰旋风', cd: 300 }
+  ],
+  mage: [
+    { id: 'fire', key: 'KeyL', label: '爆裂火球', cd: 220 },
+    { id: 'nova', key: 'KeyJ', label: '寒霜新星', cd: 300 }
+  ]
+};
+
+// 连招递减：连段越长单次伤害越低，避免一套带走
+const COMBO_SCALE = [1, 1, 0.9, 0.82, 0.74, 0.66, 0.6, 0.55, 0.5];
+const COMBO_TIERS = [
+  { min: 15, name: '无双', color: '#ff4d6d' },
+  { min: 10, name: '狂暴', color: '#ff8c42' },
+  { min: 7,  name: '华丽', color: '#ffd166' },
+  { min: 4,  name: '精彩', color: '#7ee8fa' },
+  { min: 2,  name: '连击', color: '#ffffff' }
+];
 
 // ================= 角色 =================
 class Fighter {
@@ -557,6 +597,7 @@ class Fighter {
     this.h = 140;
     this.ai = null;
     this.dmgMul = 1;      // 人机模式下按难度调整 AI 输出
+    this.skills = SKILLS[cfg.type];
     this.reset();
   }
   reset() {
@@ -567,10 +608,13 @@ class Fighter {
     this.onGround = true;
     this.animT = 0;
     this.attackT = 0; this.attackDur = 20; this.attackCd = 0;
-    this.skillCd = 0;
+    this.cds = this.skills.map(() => 0);
     this.hitStun = 0; this.flash = 0; this.invuln = 0;
     this.dashT = 0; this.hitSet = new Set();
     this.combo = 0; this.comboT = 0;
+    this.chainStep = 0; this.chainT = 0;   // 连招段数与续接窗口
+    this.whirlT = 0; this.whirlTick = 0;   // 烈焰旋风
+    this.novaT = 0;                        // 寒霜新星
     this.walkPhase = 0;
     this.ghosts = [];
   }
@@ -579,8 +623,16 @@ class Fighter {
   update(opp) {
     if (this.flash > 0) this.flash--;
     if (this.attackCd > 0) this.attackCd--;
-    if (this.skillCd > 0) this.skillCd--;
+    for (let i = 0; i < this.cds.length; i++) {
+      if (this.cds[i] > 0) {
+        this.cds[i]--;
+        if (this.cds[i] === 0) SFX.ready();   // 冷却结束的提示音
+      }
+    }
     if (this.invuln > 0) this.invuln--;
+    if (this.chainT > 0) { this.chainT--; if (this.chainT === 0) this.chainStep = 0; }
+    if (this.whirlT > 0) this.whirlT--;
+    if (this.novaT > 0) this.novaT--;
     if (this.comboT > 0) { this.comboT--; if (this.comboT === 0) this.combo = 0; }
     this.animT++;
 
@@ -617,7 +669,9 @@ class Fighter {
         this.vy = -this.jumpPower; this.onGround = false; SFX.jump();
       }
       if (inp.attack && this.attackCd <= 0 && this.attackT <= 0) this.doAttack();
-      if (inp.skill && this.skillCd <= 0 && this.attackT <= 0) this.doSkill();
+      for (let i = 0; i < this.skills.length; i++) {
+        if (inp.skills[i] && this.cds[i] <= 0 && this.attackT <= 0 && this.dashT <= 0) this.castSkill(i, opp);
+      }
     } else if (this.onGround) {
       this.vx *= 0.88;   // 硬直中给地面摩擦，避免被连续击退一路滑到墙角
     }
@@ -626,6 +680,19 @@ class Fighter {
     if (this.attackT > 0) {
       this.attackT--;
       if (this.type === 'sword') this.meleeCheck(opp);
+    }
+
+    // 烈焰旋风：环绕多段打击
+    if (this.whirlT > 0 && gameState === 'fight') {
+      if (this.whirlTick > 0) this.whirlTick--;
+      else {
+        this.whirlTick = 11;
+        const b = this.meleeBox(150, 150);
+        if (overlap(b, opp.bodyBox) && opp.invuln <= 0) {
+          hitTarget(opp, this, Math.round(this.dmg * 1.1 * this.dmgMul), this.facing * 3.5, 12, 'whirl');
+          spawnHit(opp.x, opp.y - 92, 'whirl');
+        }
+      }
     }
 
     // 冲刺伤害判定
@@ -670,83 +737,125 @@ class Fighter {
     const c = this.controls;
     return {
       left: !!keys[c.left], right: !!keys[c.right],
-      jump: consume(c.jump), attack: consume(c.attack), skill: consume(c.skill)
+      jump: consume(c.jump), attack: consume(c.attack),
+      skills: this.skills.map(s => consume(s.key))
     };
   }
 
+  // 普通攻击：三段连招，第三段为收招（击飞 / 强化弹）
   doAttack() {
+    this.chainStep = this.chainT > 0 ? (this.chainStep + 1) % 3 : 0;
+    const fin = this.chainStep === 2;
+
     if (this.type === 'sword') {
-      this.attackT = this.attackDur;
-      this.attackCd = this.attackDur + 8;
+      this.attackT = this.attackDur = fin ? 30 : 20;
+      this.attackCd = this.attackT + 8;
+      this.chainT = fin ? 0 : this.attackT + 36;   // 收招后连段重置
       this.hitSet.clear();
-      SFX.slash();
+      if (fin) SFX.heavy(); else SFX.slash();
     } else {
-      this.attackT = 16;
-      this.attackCd = 34;
+      this.attackT = fin ? 22 : 16;
+      this.attackCd = fin ? 48 : 34;
+      this.chainT = fin ? 0 : this.attackT + 40;
       this.hitSet.clear();
       projectiles.push(new Projectile(
-        this.x + this.facing * 34, this.y - 96, this.facing * 13.5, this,
-        { dmg: Math.round(this.dmg * this.dmgMul), color: '#6fc6ff', r: 11, life: 95, type: 'bolt' }
+        this.x + this.facing * 34, this.y - 96, this.facing * (fin ? 17 : 13.5), this, {
+          dmg: Math.round(this.dmg * (fin ? 1.8 : 1) * this.dmgMul),
+          color: fin ? '#ffd0ff' : '#6fc6ff', r: fin ? 16 : 11, life: 95, type: 'bolt'
+        }
       ));
       SFX.shoot();
     }
   }
 
-  doSkill() {
-    if (this.type === 'sword') {
+  castSkill(i, opp) {
+    const sk = this.skills[i];
+    if (sk.id === 'dash') {
       this.dashT = 16; this.invuln = 16;
       this.vx = this.facing * 21;
-      this.skillCd = 165;
       this.hitSet.clear();
       this.ghosts = [];
       SFX.dash();
-    } else {
-      this.attackT = 26;
-      this.skillCd = 220;
+    } else if (sk.id === 'whirl') {
+      this.whirlT = 44; this.whirlTick = 0;
+      this.animT = 0;
+      SFX.whirl();
+      shake(5);
+    } else if (sk.id === 'fire') {
+      this.attackT = 26; this.attackDur = 26;
       this.hitSet.clear();
       projectiles.push(new Projectile(
         this.x + this.facing * 40, this.y - 96, this.facing * 10, this,
         { dmg: Math.round(24 * this.dmgMul), color: '#ff9430', r: 21, life: 115, type: 'fire' }
       ));
       SFX.shoot();
+    } else if (sk.id === 'nova') {
+      this.novaT = 26;
+      this.invuln = Math.max(this.invuln, 10);
+      SFX.nova();
+      shake(9);
+      // 以自身为中心的范围爆发：命中则击飞，用来反打贴脸的敌人
+      const b = { x: this.x - 150, y: this.y - 190, w: 300, h: 190 };
+      if (overlap(b, opp.bodyBox) && opp.invuln <= 0) {
+        hitTarget(opp, this, Math.round(16 * this.dmgMul), sign(opp.x - this.x) * 9, 22, 'nova', -14);
+      }
     }
+    this.cds[i] = sk.cd;
   }
 
-  meleeBox() {
-    const w = 92, h = 118;
+  meleeBox(w, h) {
+    w = w || 92; h = h || 118;
     const x = this.facing > 0 ? this.x + 6 : this.x - 6 - w;
     return { x: x, y: this.y - 132, w: w, h: h };
   }
   meleeCheck(opp) {
+    const fin = this.chainStep === 2;
     const elapsed = this.attackDur - this.attackT;
-    if (elapsed < 5 || elapsed > 13) return;
+    const from = fin ? 8 : 5, to = fin ? 20 : 13;
+    if (elapsed < from || elapsed > to) return;
     if (this.hitSet.has(opp)) return;
-    if (overlap(this.meleeBox(), opp.bodyBox)) {
+    if (overlap(this.meleeBox(fin ? 112 : 92, fin ? 130 : 118), opp.bodyBox)) {
       this.hitSet.add(opp);
-      hitTarget(opp, this, Math.round(this.dmg * this.dmgMul), this.facing * this.knock, 16, 'melee');
+      if (fin) {
+        // 收招：高伤 + 击飞，可接后续连段
+        hitTarget(opp, this, Math.round(this.dmg * 1.6 * this.dmgMul), this.facing * 11, 26, 'dash', -13);
+        shake(11);
+      } else {
+        hitTarget(opp, this, Math.round(this.dmg * this.dmgMul), this.facing * this.knock, 16, 'melee');
+      }
     }
   }
 }
 
 // ================= 命中处理 =================
-function hitTarget(target, attacker, dmg, knockX, stun, kind) {
+function hitTarget(target, attacker, dmg, knockX, stun, kind, knockY) {
   if (target.invuln > 0 || gameState !== 'fight') return;
+
+  // 连招递减：连段越长，单次伤害越低
+  if (attacker && attacker.combo > 0) {
+    const s = COMBO_SCALE[Math.min(attacker.combo, COMBO_SCALE.length - 1)];
+    dmg = Math.max(1, Math.round(dmg * s));
+  }
+
   target.hp = Math.max(0, target.hp - dmg);
   target.hitStun = stun;
   target.vx += knockX;
+  if (knockY) { target.vy = knockY; target.onGround = false; }   // 击飞
   target.attackT = 0;
+  target.whirlT = 0;
   target.flash = 9;
   if (attacker) { attacker.combo++; attacker.comboT = 100; }
 
   spawnHit(target.x, target.y - 92, kind);
-  shake(kind === 'dash' || kind === 'fire' ? 10 : 6);
+  const heavyHit = kind === 'dash' || kind === 'fire' || kind === 'nova' || kind === 'whirl';
+  shake(heavyHit ? 10 : 6);
   floaters.push({
     x: target.x + rand(-14, 14), y: target.y - 136,
     text: '-' + dmg, vy: -1.15, life: 42,
-    color: kind === 'fire' ? '#ffb03a' : kind === 'dash' ? '#ffd166' : '#ffffff',
-    big: kind === 'dash' || kind === 'fire'
+    color: kind === 'fire' ? '#ffb03a' : heavyHit ? '#ffd166' : '#ffffff',
+    big: heavyHit
   });
-  if (kind === 'dash' || kind === 'fire') SFX.boom(); else SFX.hit();
+  if (heavyHit) SFX.boom(); else SFX.hit();
 
   if (target.hp <= 0) knockOut(target, attacker);
 }
@@ -1019,7 +1128,40 @@ function drawFighter(f) {
   }
   ctx.restore();
 
+  // 烈焰旋风：三道环绕刀光
+  if (f.whirlT > 0) {
+    const fade = clamp(f.whirlT / 10, 0, 1);
+    for (let k = 0; k < 3; k++) {
+      const a = f.animT * 0.44 - k * 1.15;
+      ctx.save();
+      ctx.translate(0, -78);
+      ctx.rotate(a);
+      ctx.globalAlpha = (0.85 - k * 0.24) * fade;
+      ctx.strokeStyle = k === 0 ? '#fff3c4' : '#ff8a3c';
+      ctx.lineWidth = k === 0 ? 8 : 5;
+      ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.arc(0, 0, 78 - k * 6, -0.8, 0.8); ctx.stroke();
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+
   ctx.restore();
+
+  // 寒霜新星：向外扩散的冰环
+  if (f.novaT > 0) {
+    const t = 1 - f.novaT / 26;
+    const rad = 34 + t * 150;
+    ctx.save();
+    ctx.globalAlpha = (1 - t) * 0.9;
+    ctx.strokeStyle = '#a8f0ff';
+    ctx.lineWidth = 10 - t * 6;
+    ctx.beginPath(); ctx.ellipse(f.x, f.y - 80, rad, rad * 0.72, 0, 0, TAU); ctx.stroke();
+    ctx.globalAlpha = (1 - t) * 0.55;
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.ellipse(f.x, f.y - 80, rad * 0.68, rad * 0.49, 0, 0, TAU); ctx.stroke();
+    ctx.restore();
+  }
 
   // 受击白光
   if (f.flash > 0) {
@@ -1030,15 +1172,17 @@ function drawFighter(f) {
     ctx.restore();
   }
 
-  // 连击提示
+  // 连击提示（随连段数升级称号）
   if (f.combo >= 2 && f.comboT > 0) {
+    const tier = COMBO_TIERS.find(t => f.combo >= t.min) || COMBO_TIERS[COMBO_TIERS.length - 1];
+    const pop = f.comboT > 88 ? 1 + (f.comboT - 88) * 0.03 : 1;   // 命中瞬间的放大反馈
     ctx.save();
     ctx.globalAlpha = clamp(f.comboT / 60, 0, 1);
     ctx.textAlign = 'center';
-    ctx.font = 'bold 26px "PingFang SC","Microsoft YaHei",sans-serif';
-    ctx.fillStyle = '#ffd166';
-    ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.lineWidth = 4;
-    const txt = f.combo + ' 连击';
+    ctx.font = 'bold ' + Math.round(28 * pop) + 'px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = tier.color;
+    ctx.strokeStyle = 'rgba(0,0,0,.65)'; ctx.lineWidth = 5;
+    const txt = f.combo + ' ' + tier.name;
     ctx.strokeText(txt, f.x, f.y - 168);
     ctx.fillText(txt, f.x, f.y - 168);
     ctx.restore();
@@ -1105,23 +1249,39 @@ function drawHealthBar(f, left) {
     }
   }
 
-  // 技能冷却
-  const cdRatio = f.type === 'sword'
-    ? clamp(f.skillCd / 165, 0, 1)
-    : clamp(f.skillCd / 220, 0, 1);
-  const ix = left ? bx + 6 : bx + bw - 46, iy = by + bh + 62;
-  ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  roundRect(ix, iy, 40, 40, 8); ctx.fill();
-  ctx.font = 'bold 13px "PingFang SC",sans-serif';
+  // 技能冷却（每个英雄两个独立技能）
+  const iw = 48, ih = 50, gap = 8, iy = by + bh + 62;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillStyle = cdRatio > 0 ? 'rgba(160,180,220,0.6)' : '#ffd166';
-  ctx.fillText(f.type === 'sword' ? '冲刺' : '火球', ix + 20, iy + 20);
-  if (cdRatio > 0) {
-    ctx.fillStyle = 'rgba(10,14,30,0.72)';
-    roundRect(ix, iy, 40, 40 * cdRatio, 8); ctx.fill();
-  } else {
-    ctx.strokeStyle = 'rgba(255,209,102,0.9)'; ctx.lineWidth = 2;
-    roundRect(ix, iy, 40, 40, 8); ctx.stroke();
+  for (let i = 0; i < f.skills.length; i++) {
+    const sk = f.skills[i];
+    const cx = iw / 2;
+    const ix = left ? bx + 6 + i * (iw + gap) : bx + bw - iw - 6 - i * (iw + gap);
+    const cd = (f.cds && f.cds[i]) || 0;
+    const ratio = clamp(cd / sk.cd, 0, 1);
+    const ready = cd <= 0;
+
+    // 底板
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    roundRect(ix, iy, iw, ih, 8); ctx.fill();
+    // 技能名
+    ctx.font = 'bold 12px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = ready ? '#ffd166' : 'rgba(160,180,220,0.6)';
+    ctx.fillText(sk.label.slice(0, 2), ix + cx, iy + 15);
+    // 按键提示
+    ctx.font = 'bold 10px "PingFang SC",sans-serif';
+    ctx.fillStyle = 'rgba(200,215,245,0.55)';
+    ctx.fillText(sk.key.replace('Key', ''), ix + cx, iy + ih - 10);
+    // 冷却遮罩 + 倒计时
+    if (!ready) {
+      ctx.fillStyle = 'rgba(10,14,30,0.72)';
+      roundRect(ix, iy, iw, ih * ratio, 8); ctx.fill();
+      ctx.font = 'bold 16px "PingFang SC",sans-serif';
+      ctx.fillStyle = '#eaf0ff';
+      ctx.fillText(Math.ceil(cd / 60), ix + cx, iy + 28);
+    } else {
+      ctx.strokeStyle = 'rgba(255,209,102,0.9)'; ctx.lineWidth = 2;
+      roundRect(ix, iy, iw, ih, 8); ctx.stroke();
+    }
   }
   ctx.textBaseline = 'alphabetic';
 }
