@@ -47,6 +47,16 @@ const ARENA_HX = 620, ARENA_HZ = 460;   // 竞技场半宽（x 轴）/ 半深（
 const BODY_R = 30;                // 角色水平碰撞半径
 const GROUND_Y = 0;
 
+// 地图障碍物（静态方块，hx/hz 为半宽，h 为高度）
+const OBSTACLES = [
+  { x: -260, z: -300, hx: 100, hz: 68, h: 82 },
+  { x:  260, z: -300, hx: 100, hz: 68, h: 82 },
+  { x: -260, z:  300, hx: 100, hz: 68, h: 82 },
+  { x:  260, z:  300, hx: 100, hz: 68, h: 82 },
+  { x: -470, z:  120, hx: 64,  hz: 110, h: 70 },
+  { x:  470, z: -120, hx: 64,  hz: 110, h: 70 },
+];
+
 const rand = (a, b) => a + Math.random() * (b - a);
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -416,6 +426,15 @@ function makeGroundTexture() {
   b.beginPath(); b.moveTo(0, -90); b.lineTo(0, 90); b.stroke();
   b.restore();
   b.globalAlpha = 1;
+  // 障碍物底座标记
+  b.fillStyle = 'rgba(110,150,255,0.16)';
+  b.strokeStyle = 'rgba(150,190,255,0.45)'; b.lineWidth = 2;
+  for (const o of OBSTACLES) {
+    const cx = px(o.x), cz = pz(o.z);
+    const hw = o.hx / 1200 * 512, hd = o.hz / 1200 * 512;
+    b.fillRect(cx - hw, cz - hd, hw * 2, hd * 2);
+    b.strokeRect(cx - hw, cz - hd, hw * 2, hd * 2);
+  }
   const t = new THREE.CanvasTexture(c);
   t.anisotropy = 4;
   return t;
@@ -436,6 +455,21 @@ addWall(0, -ARENA_HZ, ARENA_HX * 2, 14);
 addWall(0, ARENA_HZ, ARENA_HX * 2, 14);
 addWall(-ARENA_HX, 0, 14, ARENA_HZ * 2);
 addWall(ARENA_HX, 0, 14, ARENA_HZ * 2);
+
+// ---- 地图障碍物（3D） ----
+const obsTopMat = new THREE.MeshStandardMaterial({ color: 0x3b4a86, roughness: 0.85, metalness: 0.1, emissive: 0x121c3d, emissiveIntensity: 0.7 });
+const obsSideMat = new THREE.MeshStandardMaterial({ color: 0x232c55, roughness: 1, metalness: 0 });
+const obsEdgeMat = new THREE.MeshBasicMaterial({ color: 0x6f8fff, transparent: true, opacity: 0.35 });
+for (const o of OBSTACLES) {
+  const box = new THREE.Mesh(new THREE.BoxGeometry(o.hx * 2, o.h, o.hz * 2),
+    [obsSideMat, obsSideMat, obsTopMat, obsSideMat, obsSideMat, obsSideMat]);
+  box.position.set(o.x, o.h / 2, o.z);
+  box.castShadow = true; box.receiveShadow = true;
+  scene.add(box);
+  const edge = new THREE.Mesh(new THREE.BoxGeometry(o.hx * 2 + 6, 4, o.hz * 2 + 6), obsEdgeMat);
+  edge.position.set(o.x, o.h, o.z);
+  scene.add(edge);
+}
 
 // ================= 特效：火花精灵池 + 冲击环池 =================
 function makeSparkTexture() {
@@ -658,6 +692,17 @@ class EnemyAI {
     if (self.x > ARENA_HX - m) mx -= 1.2;
     if (self.z < -ARENA_HZ + m) mz += 1.2;
     if (self.z > ARENA_HZ - m) mz -= 1.2;
+
+    // 障碍物规避：临近方块时沿最近面外推，避免撞墙卡死
+    for (const o of OBSTACLES) {
+      const ox = self.x - o.x, oz = self.z - o.z;
+      const ex = o.hx + 70, ez = o.hz + 70;
+      if (Math.abs(ox) < ex && Math.abs(oz) < ez) {
+        const penX = ex - Math.abs(ox), penZ = ez - Math.abs(oz);
+        if (penX < penZ) mx += (ox < 0 ? -1 : 1) * (penX / ex) * 2.2;
+        else             mz += (oz < 0 ? -1 : 1) * (penZ / ez) * 2.2;
+      }
+    }
 
     if (mx > 0.25) out.right = true; else if (mx < -0.25) out.left = true;
     if (mz > 0.25) out.down = true; else if (mz < -0.25) out.up = true;
@@ -1048,6 +1093,7 @@ class Fighter {
     this.x += this.vx; this.z += this.vz;
     this.x = clamp(this.x, -ARENA_HX, ARENA_HX);
     this.z = clamp(this.z, -ARENA_HZ, ARENA_HZ);
+    resolveObstacleCollision(this);
 
     if (this.y <= 0.01 && this.attackT <= 0 && this.dashT <= 0) {
       this.walkPhase += Math.hypot(this.vx, this.vz) * 0.11;
@@ -1736,6 +1782,19 @@ function commitUpgrade() {
   if (upgradePhase >= 2) { round++; startRound(); }
 }
 
+// 障碍物碰撞：沿最小穿透轴把角色推出方块（含角色半径）
+function resolveObstacleCollision(f) {
+  for (const o of OBSTACLES) {
+    if (f.y >= o.h) continue;                       // 已越过方块顶部
+    const dx = f.x - o.x, dz = f.z - o.z;
+    const ox = o.hx + f.radius, oz = o.hz + f.radius;
+    if (Math.abs(dx) >= ox || Math.abs(dz) >= oz) continue;
+    const penX = ox - Math.abs(dx), penZ = oz - Math.abs(dz);
+    if (penX < penZ) f.x = o.x + (dx < 0 ? -1 : 1) * ox;
+    else             f.z = o.z + (dz < 0 ? -1 : 1) * oz;
+  }
+}
+
 // 身体碰撞：水平面分离
 function resolveBodyCollision() {
   if (Math.abs(p1.y - p2.y) > 130) return;
@@ -1748,12 +1807,25 @@ function resolveBodyCollision() {
   p2.x += ux * push; p2.z += uz * push;
   p1.x = clamp(p1.x, -ARENA_HX, ARENA_HX); p1.z = clamp(p1.z, -ARENA_HZ, ARENA_HZ);
   p2.x = clamp(p2.x, -ARENA_HX, ARENA_HX); p2.z = clamp(p2.z, -ARENA_HZ, ARENA_HZ);
+  resolveObstacleCollision(p1); resolveObstacleCollision(p2);
 }
 
 function updateProjectiles() {
   for (const pr of projectiles) {
     if (pr.dead) continue;
     pr.update();
+    // 障碍物拦截：撞到方块则销毁弹道
+    if (!pr.dead) {
+      for (const o of OBSTACLES) {
+        if (pr.y > o.h) continue;
+        if (Math.abs(pr.x - o.x) < o.hx + pr.r && Math.abs(pr.z - o.z) < o.hz + pr.r) {
+          pr.dead = true;
+          spawnHit(pr.x, pr.y, pr.z, pr.type === 'fire' ? 'fire' : 'bolt');
+          break;
+        }
+      }
+      if (pr.dead) continue;
+    }
     const target = pr.owner === p1 ? p2 : p1;
     const pd = Math.hypot(pr.x - target.x, pr.z - target.z);
     if (gameState === 'fight' && !pr.dead && pd < pr.r + target.radius && Math.abs(pr.y - (target.y + 80)) < 110 && target.invuln <= 0) {
@@ -2474,6 +2546,26 @@ function draw2DScene() {
   ctx.beginPath();
   ctx.moveTo(c00.x, c00.y); ctx.lineTo(c10.x, c10.y); ctx.lineTo(c11.x, c11.y); ctx.lineTo(c01.x, c01.y);
   ctx.closePath(); ctx.stroke();
+
+  // 障碍物（顶面 + 两个可见侧面）
+  for (const o of OBSTACLES) {
+    const x0 = o.x - o.hx, x1 = o.x + o.hx, z0 = o.z - o.hz, z1 = o.z + o.hz;
+    const t0 = project(x0, o.h, z0), t1 = project(x1, o.h, z0),
+          t2 = project(x1, o.h, z1), t3 = project(x0, o.h, z1);
+    const g0 = project(x0, 0, z0), g3 = project(x0, 0, z1), g2 = project(x1, 0, z1);
+    ctx.fillStyle = '#232c55';
+    ctx.beginPath();
+    ctx.moveTo(t2.x, t2.y); ctx.lineTo(t3.x, t3.y); ctx.lineTo(g3.x, g3.y); ctx.lineTo(g2.x, g2.y);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(t3.x, t3.y); ctx.lineTo(t0.x, t0.y); ctx.lineTo(g0.x, g0.y); ctx.lineTo(g3.x, g3.y);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#3b4a86';
+    ctx.beginPath();
+    ctx.moveTo(t0.x, t0.y); ctx.lineTo(t1.x, t1.y); ctx.lineTo(t2.x, t2.y); ctx.lineTo(t3.x, t3.y);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(120,160,255,0.5)'; ctx.lineWidth = 1.5; ctx.stroke();
+  }
 
   // 技能指向
   drawAim2D(p1); drawAim2D(p2);
