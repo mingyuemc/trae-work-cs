@@ -14,10 +14,26 @@
     border-radius:10px;overflow:hidden;background:#05060c;}
   #stage canvas{position:absolute;inset:0;display:block;width:1280px;height:720px;}
   #hud{pointer-events:none;z-index:2;}
+  #netui{position:absolute;inset:0;z-index:6;display:none;flex-direction:column;align-items:center;
+    justify-content:center;gap:14px;padding:40px;text-align:center;color:#dbe4ff;
+    background:radial-gradient(circle at 50% 35%,#141a3a,#05060c 72%);}
+  #netui h2{font-size:30px;letter-spacing:2px;color:#ffd166;}
+  #netui p{font-size:15px;line-height:1.75;color:#93a2cf;max-width:760px;}
+  #netui b{color:#cfe0ff;}
+  #netui textarea{width:760px;height:104px;resize:none;background:#0b0f22;color:#cfe0ff;
+    border:1px solid rgba(120,160,255,.35);border-radius:8px;padding:10px;font-size:12px;
+    line-height:1.5;font-family:ui-monospace,Menlo,Consolas,monospace;outline:none;}
+  #netui .row{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;}
+  #netui button{cursor:pointer;padding:12px 26px;border-radius:10px;border:1px solid rgba(140,170,240,.5);
+    background:linear-gradient(180deg,#2a3566,#1a2244);color:#e6eeff;font-size:17px;font-weight:600;
+    font-family:inherit;}
+  #netui button:hover{background:linear-gradient(180deg,#38477f,#232c57);}
+  #netui button.pri{background:linear-gradient(180deg,#ffd166,#f0a52e);color:#3a2600;border-color:#ffd166;}
+  #netui #netMsg{min-height:20px;color:#7ee8fa;font-size:14px;}
 </style>
 </head>
 <body>
-<div id="wrap"><div id="stage"><canvas id="hud" width="1280" height="720"></canvas></div></div>
+<div id="wrap"><div id="stage"><canvas id="hud" width="1280" height="720"></canvas><div id="netui"></div></div></div>
 <script src="three.min.js"></script>
 <script>
 (() => {
@@ -520,8 +536,10 @@ function spawnHit(x, y, z, kind) {
 
 // ================= 弹道 =================
 let projectiles = [];
+let projIdSeq = 0;
 class Projectile {
   constructor(x, y, z, vx, vz, owner, o) {
+    this.__id = ++projIdSeq;
     this.x = x; this.y = y; this.z = z; this.vx = vx; this.vz = vz;
     this.owner = owner; this.dmg = o.dmg; this.color = o.color;
     this.r = o.r; this.life = o.life; this.type = o.type;
@@ -1039,6 +1057,7 @@ class Fighter {
   }
 
   getInput(opp) {
+    if (this.netRemote) return netRemoteIntent();      // 联机：远端玩家的输入由网络提供
     if (this.ai) return this.ai.think(this, opp, projectiles);
     const c = this.controls;
     return {
@@ -1059,7 +1078,7 @@ class Fighter {
       this.attackCd = this.attackT + 8;
       this.chainT = fin ? 0 : this.attackT + 36;
       this.hitSet.clear();
-      if (fin) SFX.heavy(); else SFX.slash();
+      netSfx(fin ? 'heavy' : 'slash');
     } else {
       this.attackT = fin ? 22 : 16;
       this.attackCd = fin ? 48 : 34;
@@ -1073,7 +1092,7 @@ class Fighter {
           color: fin ? '#ffd0ff' : '#6fc6ff', r: Math.round((fin ? 16 : 11) * this.mods.range), life: 130, type: 'bolt'
         }
       ));
-      SFX.shoot();
+      netSfx('shoot');
     }
   }
 
@@ -1084,10 +1103,10 @@ class Fighter {
       this.dashT = 16; this.invuln = 16;
       this.vx = Math.sin(this.angle) * 22; this.vz = Math.cos(this.angle) * 22;
       this.hitSet.clear(); this.ghosts = [];
-      SFX.dash();
+      netSfx('dash');
     } else if (sk.id === 'whirl') {
       this.whirlT = 44; this.whirlTick = 0; this.animT = 0;
-      SFX.whirl(); shake(5);
+      netSfx('whirl'); netShake(5);
     } else if (sk.id === 'fire') {
       this.targetAngle = this.angle = aimAt(this, opp);
       this.attackT = 26; this.attackDur = 26; this.hitSet.clear();
@@ -1097,13 +1116,13 @@ class Fighter {
         Math.sin(ang) * 10, Math.cos(ang) * 10, this,
         { dmg: Math.round(24 * this.mods.power * this.mods.skillPower[0] * this.dmgMul), color: '#ff9430', r: Math.round(21 * this.mods.range), life: 150, type: 'fire' }
       ));
-      SFX.shoot();
+      netSfx('shoot');
     } else if (sk.id === 'nova') {
       this.novaT = 26;
       this.invuln = Math.max(this.invuln, 10);
-      SFX.nova(); shake(9);
+      netSfx('nova'); netShake(9);
       const rr = 230 * this.mods.range;
-      spawnRing(this.x, this.z, 20, rr, '#a8f0ff', 26);
+      netRing(this.x, this.z, 20, rr, '#a8f0ff', 26);
       if (distXZ(this, opp) < rr && opp.invuln <= 0) {
         hitTarget(opp, this, Math.round(16 * this.mods.power * this.mods.skillPower[1] * this.dmgMul), 22, 'nova', -14);
       }
@@ -1211,17 +1230,17 @@ function hitTarget(target, attacker, dmg, stun, kind, knockUp) {
   if (attacker && attacker.mods && attacker.mods.lifesteal > 0 && attacker.hp < attacker.maxHp) {
     const heal = Math.max(1, Math.round(dmg * attacker.mods.lifesteal));
     attacker.hp = Math.min(attacker.maxHp, attacker.hp + heal);
-    floaters.push({ x: attacker.x, y: attacker.y + 210, z: attacker.z, text: '+' + heal, vy: 1.2, life: 34, color: '#7cffa0' });
+    netFloater({ x: attacker.x, y: attacker.y + 210, z: attacker.z, text: '+' + heal, vy: 1.2, life: 34, color: '#7cffa0' });
   }
-  spawnHit(target.x, target.y + 90, target.z, kind);
+  netHit(target.x, target.y + 90, target.z, kind);
   const heavyHit = kind === 'dash' || kind === 'fire' || kind === 'nova' || kind === 'whirl';
-  shake(heavyHit ? 10 : 6);
-  floaters.push({
+  netShake(heavyHit ? 10 : 6);
+  netFloater({
     x: target.x + rand(-14, 14), y: target.y + 175, z: target.z,
     text: '-' + dmg, vy: 1.5, life: 42,
     color: kind === 'fire' ? '#ffb03a' : heavyHit ? '#ffd166' : '#ffffff', big: heavyHit
   });
-  if (heavyHit) SFX.boom(); else SFX.hit();
+  netSfx(heavyHit ? 'boom' : 'hit');
   if (target.hp <= 0) knockOut(target, attacker);
 }
 
@@ -1230,7 +1249,7 @@ function knockOut(target, attacker) {
   gameState = 'roundover'; stateT = 0;
   roundResult = attacker.side === 0 ? 0 : 1;
   wins[attacker.side]++;
-  shake(16); SFX.ko();
+  netShake(16); netSfx('ko');
   const dx = target.x - attacker.x, dz = target.z - attacker.z, L = Math.hypot(dx, dz) || 1;
   target.vx = dx / L * 14; target.vz = dz / L * 14;
   target.vy = -13; target.y = Math.max(target.y, 1);
@@ -1240,7 +1259,7 @@ function timeOut() {
   gameState = 'roundover'; stateT = 0;
   if (p1.hp === p2.hp) roundResult = -1;
   else { roundResult = p1.hp > p2.hp ? 0 : 1; wins[roundResult]++; }
-  SFX.ko();
+  netSfx('ko');
 }
 
 // ================= 特效容器 =================
@@ -1259,6 +1278,398 @@ function project(x, y, z) {
   return { x: (_pv.x * 0.5 + 0.5) * W, y: (-_pv.y * 0.5 + 0.5) * H, z: _pv.z };
 }
 
+// ================= P2P 联机（WebRTC 直连 + 主机权威同步） =================
+// 设计：主机跑完整模拟，客户端只上传操作意图、接收状态快照并渲染。
+// 连接：手动交换一次 WebRTC 连接码（offer/answer），无需任何服务器。
+const netui = document.getElementById('netui');
+const NET_ICE = { iceServers: [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' }
+] };
+
+const net = {
+  role: null, pc: null, dc: null,
+  active: false, connected: false,
+  remoteSeq: -1,
+  held: { up: false, down: false, left: false, right: false },
+  edges: null,
+  latestSnap: null,
+  inputSeq: 0,
+  events: [],
+  projMap: new Map(),
+  txFrame: 0,
+  rtt: 0,
+  pingSent: 0,
+  guestPick: -1,
+  send(o) {
+    if (this.dc && this.dc.readyState === 'open') { try { this.dc.send(JSON.stringify(o)); } catch (e) { } }
+  }
+};
+
+// ---- 特效 / 音效事件：主机产生，客户端回放 ----
+function netEmit(e) { if (net.active && net.role === 'host') net.events.push(e); }
+function netFloater(o) { floaters.push(o); netEmit({ k: 'fl', o: o }); }
+function netHit(x, y, z, kind) { spawnHit(x, y, z, kind); netEmit({ k: 'hit', x: x, y: y, z: z, kind: kind }); }
+function netRing(x, z, r0, r1, color, life) { spawnRing(x, z, r0, r1, color, life); netEmit({ k: 'rg', x: x, z: z, r0: r0, r1: r1, color: color, life: life }); }
+function netShake(m) { shake(m); netEmit({ k: 'sk', m: m }); }
+function netSfx(name) { if (SFX[name]) SFX[name](); netEmit({ k: 'sfx', n: name }); }
+function applyNetEvent(e) {
+  if (e.k === 'fl') floaters.push(e.o);
+  else if (e.k === 'hit') spawnHit(e.x, e.y, e.z, e.kind);
+  else if (e.k === 'rg') spawnRing(e.x, e.z, e.r0, e.r1, e.color, e.life);
+  else if (e.k === 'sk') shake(e.m);
+  else if (e.k === 'sfx') { if (SFX[e.n]) SFX[e.n](); }
+}
+
+// ---- 远端输入（主机侧对 p2 取用；边沿信号每次结算后清空） ----
+function netRemoteIntent() {
+  if (!net.edges) net.edges = { attack: false, skills: p2.skills.map(() => false) };
+  const e = net.edges;
+  const out = {
+    up: net.held.up, down: net.held.down, left: net.held.left, right: net.held.right,
+    attack: e.attack, skills: e.skills.slice()
+  };
+  e.attack = false;
+  for (let i = 0; i < e.skills.length; i++) e.skills[i] = false;
+  return out;
+}
+
+// ---- 状态序列化 / 反序列化 ----
+function fighterState(f) {
+  const r1 = v => Math.round(v * 10) / 10, r2 = v => Math.round(v * 100) / 100;
+  return [
+    r1(f.x), r1(f.y), r1(f.z), r2(f.vx), r2(f.vy), r2(f.vz),
+    r2(f.angle), r2(f.targetAngle), f.hp, f.maxHp, f.animT, f.attackT, f.attackDur,
+    f.cds[0] || 0, f.cds[1] || 0,
+    f.hitStun, f.invuln, f.dashT, f.whirlT, f.novaT,
+    f.chainStep, f.chainT, f.combo, f.comboT, f.flash, r2(f.walkPhase)
+  ];
+}
+function applyFighterState(f, a) {
+  f.x = a[0]; f.y = a[1]; f.z = a[2]; f.vx = a[3]; f.vy = a[4]; f.vz = a[5];
+  f.angle = a[6]; f.targetAngle = a[7]; f.hp = a[8]; f.maxHp = a[9];
+  f.animT = a[10]; f.attackT = a[11]; f.attackDur = a[12];
+  f.cds[0] = a[13]; f.cds[1] = a[14];
+  f.hitStun = a[15]; f.invuln = a[16]; f.dashT = a[17]; f.whirlT = a[18]; f.novaT = a[19];
+  f.chainStep = a[20]; f.chainT = a[21]; f.combo = a[22]; f.comboT = a[23]; f.flash = a[24];
+  f.walkPhase = a[25];
+  f.model.position.set(f.x, f.y, f.z);
+  f.model.rotation.set(0, f.angle, 0);
+}
+function upgradesTotal(o) { let n = 0; for (const k in o) n += o[k]; return n; }
+
+function netSyncProjectiles(list) {
+  const seen = new Set();
+  for (let i = 0; i < list.length; i++) {
+    const a = list[i], id = a[0];
+    seen.add(id);
+    let pr = net.projMap.get(id);
+    if (!pr) {
+      pr = new Projectile(a[1], a[2], a[3], 0, 0, null, { dmg: 0, color: a[5], r: a[6], life: 99999, type: a[4] });
+      net.projMap.set(id, pr);
+      projectiles.push(pr);
+    }
+    pr.x = a[1]; pr.y = a[2]; pr.z = a[3]; pr.place();
+    if ((time & 1) === 0) spawnSpark(a[1], a[2], a[3], rand(-1, 1), rand(-1, 1), rand(-1, 1), 12, a[5], a[6] * 0.5, 0);
+  }
+  for (const id of Array.from(net.projMap.keys())) {
+    if (seen.has(id)) continue;
+    const pr = net.projMap.get(id);
+    pr.dispose();
+    net.projMap.delete(id);
+    const idx = projectiles.indexOf(pr);
+    if (idx >= 0) projectiles.splice(idx, 1);
+  }
+}
+
+function netMusicFor(gs) {
+  if (gs === 'countdown' || gs === 'fight' || gs === 'roundover' || gs === 'upgrade') {
+    Music.duck = 1; Music.play('battle');
+  }
+}
+
+function applySnapshot(s) {
+  const prevGs = gameState;
+  gameState = s.gs; stateT = s.st; round = s.rd;
+  wins[0] = s.wi[0]; wins[1] = s.wi[1];
+  roundTime = s.rt;
+  roundResult = (s.pr === undefined ? null : s.pr);
+  paused = !!s.pa;
+  applyFighterState(p1, s.f[0]);
+  applyFighterState(p2, s.f[1]);
+  netSyncProjectiles(s.pj || []);
+  if (s.uc) {
+    p1.upgradeCounts = s.uc[0]; p2.upgradeCounts = s.uc[1];
+    p1.upgrades = new Array(upgradesTotal(p1.upgradeCounts));
+    p2.upgrades = new Array(upgradesTotal(p2.upgradeCounts));
+  }
+  if (s.up) {
+    upgradePhase = s.up.ph;
+    if (upgradePhase !== 1) upgradeSel = s.up.sel;   // 客户端在自己选卡时保留本地高亮
+    upgradeChoices[0] = (s.up.c[0] || []).map(id => UPGRADES.find(u => u.id === id)).filter(Boolean);
+    upgradeChoices[1] = (s.up.c[1] || []).map(id => UPGRADES.find(u => u.id === id)).filter(Boolean);
+  }
+  if (s.ev) for (let i = 0; i < s.ev.length; i++) applyNetEvent(s.ev[i]);
+  netMusicFor(gameState);
+  if (gameState === 'gameover' && prevGs !== 'gameover') { Music.stop(); playVictory(); }
+}
+
+// ---- 主机：每帧广播快照 ----
+function netHostSend() {
+  if (!net.connected || !net.dc || net.dc.readyState !== 'open') return;
+  net.txFrame++;
+  if (net.txFrame % 30 === 0) { net.pingSent = performance.now(); net.send({ t: 'ping', ts: net.pingSent }); }
+  const snap = {
+    gs: gameState, st: stateT, rd: round, wi: [wins[0], wins[1]], rt: roundTime,
+    pr: (roundResult === null ? null : roundResult), pa: paused,
+    f: [fighterState(p1), fighterState(p2)],
+    pj: projectiles.map(p => [p.__id, Math.round(p.x), Math.round(p.y), Math.round(p.z), p.type, p.color, p.r]),
+    ev: net.events
+  };
+  if (gameState === 'upgrade') {
+    snap.up = { ph: upgradePhase, sel: upgradeSel, c: [upgradeChoices[0].map(u => u.id), upgradeChoices[1].map(u => u.id)] };
+    snap.uc = [p1.upgradeCounts, p2.upgradeCounts];
+  }
+  net.events = [];
+  net.send({ t: 's', d: snap });
+}
+
+// ---- 客户端：上传输入 + 应用快照 ----
+function netGuestStep() {
+  time++;
+  if (shakeT > 0) shakeT--;
+  const open = net.connected && net.dc && net.dc.readyState === 'open';
+  if (open) {
+    if (gameState === 'upgrade') {
+      if (upgradePhase === 1) {
+        const cards = upgradeChoices[1];
+        if (cards && cards.length) {
+          if (consume('ArrowLeft')) { upgradeSel = (upgradeSel + cards.length - 1) % cards.length; SFX.nav(); }
+          if (consume('ArrowRight')) { upgradeSel = (upgradeSel + 1) % cards.length; SFX.nav(); }
+          if (consume('KeyK') || consume('Space')) { net.send({ t: 'pick', p: upgradeSel }); SFX.ready(); }
+        }
+      }
+    } else if (gameState === 'countdown' || gameState === 'fight' || gameState === 'roundover') {
+      const c = p2.controls;
+      net.inputSeq++;
+      net.send({
+        t: 'i', seq: net.inputSeq, d: {
+          up: !!keys[c.up], down: !!keys[c.down], left: !!keys[c.left], right: !!keys[c.right],
+          attack: consume(c.attack), skills: p2.skills.map(s => consume(s.key))
+        }
+      });
+    }
+    if (consume('KeyM')) { muted = !muted; Music.apply(0.15); }
+    if (time % 30 === 0) { net.pingSent = performance.now(); net.send({ t: 'ping', ts: net.pingSent }); }
+  }
+  if (net.latestSnap) { applySnapshot(net.latestSnap); net.latestSnap = null; }
+  updateFloaters(); updateSparks(); updateRings();
+  p1.pose(); p2.pose();
+  clearPressed();
+}
+
+// ---- WebRTC 握手 ----
+function netNewPC() {
+  const pc = new RTCPeerConnection(NET_ICE);
+  pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed') netMsg('连接失败，请检查网络后重试'); };
+  return pc;
+}
+function netWaitICE(pc) {
+  return new Promise(res => {
+    if (pc.iceGatheringState === 'complete') return res();
+    const done = () => { pc.removeEventListener('icegatheringstatechange', h); clearTimeout(to); res(); };
+    const h = () => { if (pc.iceGatheringState === 'complete') done(); };
+    pc.addEventListener('icegatheringstatechange', h);
+    const to = setTimeout(done, 3500);
+  });
+}
+function netEnc(o) { return btoa(unescape(encodeURIComponent(JSON.stringify(o)))); }
+function netDec(s) { return JSON.parse(decodeURIComponent(escape(atob(String(s).replace(/\s+/g, ''))))); }
+
+function netBindDC(dc) {
+  net.dc = dc;
+  dc.onopen = () => { net.connected = true; netOnConnected(); };
+  dc.onclose = () => { net.connected = false; if (net.active) netEnd('与对手的连接已断开'); };
+  dc.onmessage = ev => { let m; try { m = JSON.parse(ev.data); } catch (e) { return; } netOnMessage(m); };
+}
+function netOnMessage(m) {
+  if (m.t === 'i') {
+    if (!net.edges) net.edges = { attack: false, skills: p2.skills.map(() => false) };
+    if (m.seq <= net.remoteSeq) return;
+    net.remoteSeq = m.seq;
+    const d = m.d;
+    net.held.up = !!d.up; net.held.down = !!d.down; net.held.left = !!d.left; net.held.right = !!d.right;
+    if (d.attack) net.edges.attack = true;
+    for (let i = 0; i < net.edges.skills.length; i++) if (d.skills[i]) net.edges.skills[i] = true;
+  } else if (m.t === 's') {
+    net.latestSnap = m.d;
+    if (gameState === 'netlobby') netHide();
+  } else if (m.t === 'pick') {
+    net.guestPick = m.p;
+  } else if (m.t === 'ping') {
+    net.send({ t: 'pong', ts: m.ts });
+  } else if (m.t === 'pong') {
+    net.rtt = performance.now() - m.ts;
+  } else if (m.t === 'bye') {
+    if (net.active) netEnd('对手已离开房间');
+  }
+}
+function netOnConnected() {
+  net.active = true;
+  net.events = []; net.guestPick = -1; net.inputSeq = 0; net.remoteSeq = -1;
+  net.held = { up: false, down: false, left: false, right: false };
+  net.edges = { attack: false, skills: p2.skills.map(() => false) };
+  p2.ai = null;
+  p2.netRemote = (net.role === 'host');
+  for (const pr of net.projMap.values()) pr.dispose();
+  net.projMap = new Map();
+  if (net.role === 'host') { netHide(); startNetMatch(); }
+  else netShowWaiting('已连接，等待主机开始…');
+}
+function startNetMatch() {
+  net.active = true;
+  aiLevel = null;
+  p2.ai = null; p2.netRemote = true; p2.dmgMul = 1;
+  p1.resetMods(); p2.resetMods();
+  wins = [0, 0]; round = 1;
+  net.events = []; net.guestPick = -1;
+  Music.duck = 1; Music.play('battle'); Music.apply(0.3);
+  startRound();
+}
+
+async function netStartHost() {
+  net.role = 'host';
+  netShowWaiting('正在生成连接码…');
+  net.pc = netNewPC();
+  netBindDC(net.pc.createDataChannel('game', { ordered: true }));
+  const offer = await net.pc.createOffer();
+  await net.pc.setLocalDescription(offer);
+  await netWaitICE(net.pc);
+  netShowHostOffer(netEnc(net.pc.localDescription));
+}
+async function netHostAccept(code) {
+  await net.pc.setRemoteDescription(netDec(code));
+  netShowWaiting('正在与对手建立连接…');
+}
+async function netJoin(code) {
+  net.role = 'guest';
+  net.pc = netNewPC();
+  net.pc.ondatachannel = e => netBindDC(e.channel);
+  await net.pc.setRemoteDescription(netDec(code));
+  const ans = await net.pc.createAnswer();
+  await net.pc.setLocalDescription(ans);
+  netShowWaiting('正在生成应答码…');
+  await netWaitICE(net.pc);
+  netShowGuestAnswer(netEnc(net.pc.localDescription));
+}
+
+function netTeardown() {
+  net.send({ t: 'bye' });
+  if (net.dc) { try { net.dc.close(); } catch (e) { } }
+  if (net.pc) { try { net.pc.close(); } catch (e) { } }
+  for (const pr of net.projMap.values()) {
+    pr.dispose();
+    const i = projectiles.indexOf(pr);
+    if (i >= 0) projectiles.splice(i, 1);
+  }
+  net.projMap = new Map();
+  net.dc = null; net.pc = null;
+  net.active = false; net.connected = false; net.role = null;
+  net.latestSnap = null;
+  p2.netRemote = false;
+  netHide();
+}
+function netEnd(msg) {
+  net.active = false;
+  gameState = 'netlobby';
+  netUI('<h2>连接已结束</h2><p>' + msg + '</p><div class="row"><button class="pri" id="netBack">返回主菜单</button></div>', () => {
+    netui.querySelector('#netBack').onclick = () => { netTeardown(); gameState = 'menu'; stateT = 0; };
+  });
+}
+
+// ---- 联机大厅 UI ----
+function openNetLobby() {
+  gameState = 'netlobby'; stateT = 0; currentMode = menuIndex;
+  net.role = null; net.active = false; net.connected = false; net.latestSnap = null;
+  clearPressed();
+  netShowChoose();
+}
+function netUI(html, wire) { netui.style.display = 'flex'; netui.innerHTML = html; if (wire) wire(); }
+function netHide() { netui.style.display = 'none'; netui.innerHTML = ''; }
+function netMsg(s) { const el = netui.querySelector('#netMsg'); if (el) el.textContent = s; }
+function netCopy(id, ok) {
+  const t = netui.querySelector(id);
+  if (!t) return;
+  t.focus(); t.select();
+  let done = false;
+  try { done = document.execCommand('copy'); } catch (e) { }
+  netMsg(done ? ok : '自动复制失败，请手动全选复制');
+}
+function netShowChoose() {
+  netUI(`<h2>联机对战 · P2P</h2>
+    <p>无需服务器：一方创建房间，另一方加入。<br>
+       双方各复制 / 粘贴 <b>一次连接码</b> 建立直连，之后为点对点联机。</p>
+    <p>主机操控「烈焰剑客」，客户端操控「秘法星灵」。</p>
+    <div class="row">
+      <button class="pri" id="nbHost">创建房间（我是主机）</button>
+      <button id="nbJoin">加入房间（我是客户端）</button>
+    </div>
+    <div class="row"><button id="nbBack">返回主菜单</button></div>
+    <p id="netMsg"></p>`, () => {
+    netui.querySelector('#nbHost').onclick = () => netStartHost().catch(e => netMsg('创建失败：' + e.message));
+    netui.querySelector('#nbJoin').onclick = () => netShowGuestInput();
+    netui.querySelector('#nbBack').onclick = () => { net.role = null; gameState = 'menu'; stateT = 0; netHide(); };
+  });
+}
+function netShowHostOffer(code) {
+  netUI(`<h2>房间已创建</h2>
+    <p>1. 复制下面的 <b>连接码</b>，发给对手。<br>
+       2. 对手会回传一段 <b>应答码</b>，把它粘贴到第二个框里，点「连接」。</p>
+    <textarea id="nbOffer" readonly>${code}</textarea>
+    <div class="row"><button class="pri" id="nbCopy">复制连接码</button><button id="nbCancel">取消</button></div>
+    <p>粘贴对手的应答码：</p>
+    <textarea id="nbAnswer" placeholder="在此粘贴应答码…"></textarea>
+    <div class="row"><button class="pri" id="nbAccept">连接</button></div>
+    <p id="netMsg"></p>`, () => {
+    netui.querySelector('#nbCopy').onclick = () => netCopy('#nbOffer', '已复制连接码，请发给对手');
+    netui.querySelector('#nbCancel').onclick = () => { netTeardown(); netShowChoose(); };
+    netui.querySelector('#nbAccept').onclick = () => {
+      const v = netui.querySelector('#nbAnswer').value.trim();
+      if (!v) return netMsg('请先粘贴应答码');
+      netMsg('正在连接…');
+      netHostAccept(v).catch(e => netMsg('连接失败：' + e.message));
+    };
+  });
+}
+function netShowGuestInput() {
+  net.role = 'guest';
+  netUI(`<h2>加入房间</h2>
+    <p>把主机发来的 <b>连接码</b> 粘贴到下面，然后点「生成应答码」。</p>
+    <textarea id="nbOfferIn" placeholder="在此粘贴主机的连接码…"></textarea>
+    <div class="row"><button class="pri" id="nbGen">生成应答码</button><button id="nbBack2">返回</button></div>
+    <p id="netMsg"></p>`, () => {
+    netui.querySelector('#nbGen').onclick = () => {
+      const v = netui.querySelector('#nbOfferIn').value.trim();
+      if (!v) return netMsg('请先粘贴主机的连接码');
+      netMsg('正在解析…');
+      netJoin(v).catch(e => netMsg('连接码无效：' + e.message));
+    };
+    netui.querySelector('#nbBack2').onclick = () => { net.role = null; netShowChoose(); };
+  });
+}
+function netShowGuestAnswer(code) {
+  netUI(`<h2>应答码已生成</h2>
+    <p>把下面的 <b>应答码</b> 复制回给主机，等待主机完成连接。</p>
+    <textarea id="nbAns" readonly>${code}</textarea>
+    <div class="row"><button class="pri" id="nbCopy2">复制应答码</button></div>
+    <p id="netMsg">等待主机连接…</p>`, () => {
+    netui.querySelector('#nbCopy2').onclick = () => netCopy('#nbAns', '已复制应答码，请发回给主机');
+  });
+}
+function netShowWaiting(text) {
+  netUI('<h2>联机中</h2><p>' + text + '</p><p id="netMsg"></p>');
+}
+
 // ================= 状态与流程 =================
 let gameState = 'menu';
 let stateT = 0, time = 0;
@@ -1270,6 +1681,7 @@ const TOTAL_ROUND_TIME = 75 * 60;
 
 const MENU = [
   { id: 'pvp',    label: '双人对战',   desc: '两名玩家同屏操作' },
+  { id: 'p2p',    label: '联机对战',   desc: 'P2P 直连 · 跨设备对战' },
   { id: 'easy',   label: '人机 · 简单', desc: '反应慢、会失误' },
   { id: 'normal', label: '人机 · 普通', desc: '会走位与闪避' },
   { id: 'hard',   label: '人机 · 困难', desc: '反应快、抓破绽' }
@@ -1301,7 +1713,8 @@ function startRound() {
 function startMatch(modeIdx) {
   if (modeIdx === undefined) modeIdx = currentMode;
   currentMode = modeIdx;
-  aiLevel = modeIdx === 0 ? null : MENU[modeIdx].id;
+  const modeId = MENU[modeIdx].id;
+  aiLevel = (modeId === 'pvp' || modeId === 'p2p') ? null : modeId;
   p2.ai = aiLevel ? new EnemyAI(aiLevel) : null;
   p2.dmgMul = aiLevel ? DIFFS[aiLevel].dmg : 1;
   p1.resetMods(); p2.resetMods();
@@ -1352,7 +1765,7 @@ function updateProjectiles() {
   projectiles = projectiles.filter(p => !p.dead);
 }
 
-function fixedUpdate() {
+function simulate() {
   time++;
   if (shakeT > 0) shakeT--;
   if (consume('KeyM')) { muted = !muted; Music.apply(0.15); }
@@ -1364,12 +1777,21 @@ function fixedUpdate() {
     if (consume('KeyS') || consume('ArrowDown')) menuIndex = (menuIndex + 1) % MENU.length;
     for (let i = 0; i < MENU.length; i++) if (consume('Digit' + (i + 1)) || consume('Numpad' + (i + 1))) menuIndex = i;
     if (menuIndex !== before) SFX.nav();
-    if (consume('Enter') || consume('Space')) { startMatch(menuIndex); SFX.go(); }
+    if (consume('Enter') || consume('Space')) {
+      if (MENU[menuIndex].id === 'p2p') openNetLobby();
+      else startMatch(menuIndex);
+      SFX.go();
+    }
     clearPressed(); return;
   }
+  if (gameState === 'netlobby') { clearPressed(); return; }
   if (gameState === 'gameover') {
     updateFloaters();
-    if (consume('Enter') || consume('Space')) { gameState = 'menu'; stateT = 0; menuIndex = currentMode; }
+    if (consume('Enter') || consume('Space')) {
+      if (net.active || net.connected) netTeardown();
+      gameState = 'menu'; stateT = 0;
+      menuIndex = currentMode < MENU.length ? currentMode : 0;
+    }
     clearPressed(); return;
   }
   if (gameState === 'upgrade') {
@@ -1378,6 +1800,13 @@ function fixedUpdate() {
     const cards = upgradeChoices[upgradePhase];
     if (chooser.ai) {
       if (stateT >= 50) { upgradeSel = Math.floor(Math.random() * cards.length); commitUpgrade(); }
+    } else if (chooser.netRemote) {
+      // 联机：等待客户端选卡（15 秒无响应则兜底选择第一张）
+      if (net.guestPick >= 0) {
+        upgradeSel = clamp(net.guestPick | 0, 0, cards.length - 1);
+        net.guestPick = -1;
+        commitUpgrade();
+      } else if (stateT >= 900) { upgradeSel = 0; commitUpgrade(); }
     } else {
       const prev = consume(upgradePhase === 0 ? 'KeyA' : 'ArrowLeft');
       const next = consume(upgradePhase === 0 ? 'KeyD' : 'ArrowRight');
@@ -1388,14 +1817,14 @@ function fixedUpdate() {
     }
     clearPressed(); return;
   }
-  if (consume('KeyR')) { startMatch(); clearPressed(); return; }
+  if (!net.active && consume('KeyR')) { startMatch(); clearPressed(); return; }
   if (consume('KeyP')) { paused = !paused; Music.duck = paused ? 0.3 : 1; Music.apply(0.25); }
   if (paused) { clearPressed(); return; }
 
   if (gameState === 'countdown') {
     stateT++;
-    if (stateT % 45 === 0 && stateT < 135) SFX.count();
-    if (stateT === 135) SFX.go();
+    if (stateT % 45 === 0 && stateT < 135) netSfx('count');
+    if (stateT === 135) netSfx('go');
     p1.animT++; p2.animT++;
     p1.pose(); p2.pose();
     updateFloaters(); updateSparks(); updateRings();
@@ -1430,6 +1859,13 @@ function fixedUpdate() {
     clearPressed(); return;
   }
   clearPressed();
+}
+
+// 固定步长分发：客户端只上传输入并渲染主机快照，主机负责全部模拟
+function fixedUpdate() {
+  if (net.active && net.role === 'guest') { netGuestStep(); return; }
+  simulate();
+  if (net.active && net.role === 'host') netHostSend();
 }
 
 // ================= 相机跟随 =================
@@ -1597,10 +2033,20 @@ function drawHUD() {
   ctx.fillText('红方：WASD 走位  F 普攻  G 冲刺  H 旋风', 56, H - 26);
   ctx.textAlign = 'right';
   ctx.fillText(aiLevel ? '蓝方：电脑 AI（' + DIFFS[aiLevel].label + '）'
+    : net.active ? '蓝方：对手（联机）'
     : '蓝方：↑↓←→ 走位  K 普攻  L 火球  J 新星', W - 56, H - 26);
   ctx.textAlign = 'center';
-  ctx.fillText('Enter 重开   P 暂停   M 静音' + (muted ? '（已静音）' : ''), W / 2, H - 26);
+  ctx.fillText((net.active ? '' : 'Enter 重开   ') + 'P 暂停   M 静音' + (muted ? '（已静音）' : ''), W / 2, H - 26);
   ctx.textBaseline = 'alphabetic';
+
+  if (net.active) {
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = net.connected ? 'rgba(126,232,250,0.92)' : 'rgba(255,120,120,0.95)';
+    ctx.fillText('联机 · ' + (net.role === 'host' ? '主机' : '客户端')
+      + (net.connected ? (' · ' + Math.max(0, Math.round(net.rtt)) + 'ms') : ' · 已断开'), W / 2, 118);
+    ctx.textBaseline = 'alphabetic';
+  }
 
   if (aiLevel) {
     ctx.textAlign = 'right';
@@ -1818,7 +2264,7 @@ function drawMenu() {
   drawCard(p2, W / 2 + 205);
 
   MENU.forEach((o, i) => {
-    const y = 452 + i * 44;
+    const y = 424 + i * 42;
     const sel = i === menuIndex;
     if (sel) {
       ctx.fillStyle = 'rgba(255,209,102,0.14)';
@@ -1842,12 +2288,12 @@ function drawMenu() {
   ctx.textAlign = 'center';
   ctx.font = '16px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(160,180,220,0.7)';
-  ctx.fillText('W / S 或 ↑ / ↓ 切换模式    ·    数字键 1-4 直选    ·    M 静音', W / 2, 645);
+  ctx.fillText('W / S 或 ↑ / ↓ 切换模式    ·    数字键 1-5 直选    ·    M 静音', W / 2, 638);
 
   const a = 0.5 + 0.5 * Math.sin(time * 0.08);
   ctx.font = 'bold 26px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,' + (0.45 + a * 0.55) + ')';
-  ctx.fillText('按  Enter  开始对战', W / 2, 688);
+  ctx.fillText('按  Enter  开始对战', W / 2, 682);
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -2087,6 +2533,7 @@ function render() {
   if (use2D) draw2DScene(); else renderer.render(scene, camera);
 
   if (gameState === 'menu') { drawMenu(); return; }
+  if (gameState === 'netlobby') return;   // 联机大厅由 DOM 覆盖层呈现
   drawHUD();
   drawFloaters();
 
