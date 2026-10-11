@@ -288,33 +288,21 @@ function playVictory() {
 Music.play('menu');
 
 // ================= Three.js 场景基座 =================
-function showFatal(msg) {
-  hud.style.display = 'none';
-  const box = document.createElement('div');
-  box.style.cssText = 'position:absolute;inset:0;z-index:9;display:flex;flex-direction:column;' +
-    'align-items:center;justify-content:center;text-align:center;padding:48px;gap:16px;' +
-    'background:radial-gradient(circle at 50% 40%,#141a3a,#05060c 70%);color:#dbe4ff;' +
-    'font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;';
-  box.innerHTML = '<div style="font-size:30px;font-weight:700;letter-spacing:2px;">无法启动 3D 渲染</div>' +
-    '<div style="font-size:16px;line-height:1.8;color:#93a2cf;white-space:pre-line;max-width:640px;">' +
-    msg + '</div>';
-  stage.appendChild(box);
-}
-
-let renderer;
+// 若环境不支持 WebGL，则自动降级到 2D 兼容渲染（use2D = true），保证仍可对战。
+let renderer = null;
+let use2D = false;
 try {
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(W, H);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  stage.appendChild(renderer.domElement);
+  renderer.domElement.style.zIndex = '1';
 } catch (err) {
-  console.error('[3D MOBA] WebGL 初始化失败：', err);
-  showFatal('当前环境不支持 WebGL，无法运行 3D 版本。\n请改用支持 WebGL 的现代浏览器（Chrome / Edge / Firefox 等）打开本页面。');
-  return;
+  console.warn('[3D MOBA] WebGL 不可用，已切换到 2D 兼容渲染：', err);
+  use2D = true;
 }
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setSize(W, H);
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-stage.appendChild(renderer.domElement);
-renderer.domElement.style.zIndex = '1';
 
 const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0x0a1030, 1500, 3400);
@@ -813,7 +801,7 @@ function buildSwordHero(color, color2) {
   armR.add(sword);
 
   grp.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-  return { group: grp, parts: { legL, legR, armL, armR, head, body, weapon: sword, glow: null } };
+  return { group: grp, parts: { legL, legR, armL, armR, head, body, weapon: sword, glow: null }, mats };
 }
 
 function buildMageHero(color, color2) {
@@ -823,7 +811,7 @@ function buildMageHero(color, color2) {
   const skin = matStandard('#f0c39c', 0.85, 0.1);
   const gold = matStandard('#ffd166', 0.35, 0.8);
   const glowMat = new THREE.MeshBasicMaterial({ color: 0xa8e4ff });
-  heroMats.push(main, dark, skin, gold);
+  const mats = [main, dark, skin, gold];   // 本英雄专属材质（受击闪白用）
 
   // 长袍（下摆锥形）
   const robe = new THREE.Mesh(new THREE.CylinderGeometry(30, 52, 108, 18), main);
@@ -864,7 +852,7 @@ function buildMageHero(color, color2) {
   grp.add(star);
 
   grp.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-  return { group: grp, parts: { legL: null, legR: null, armL, armR, head, body: null, weapon: staff, glow: star } };
+  return { group: grp, parts: { legL: null, legR: null, armL, armR, head, body: null, weapon: staff, glow: star }, mats };
 }
 
 // 技能指向指示（贴地平面，朝对手方向延伸）
@@ -905,6 +893,7 @@ class Fighter {
     const built = cfg.type === 'sword' ? buildSwordHero(cfg.color, cfg.color2) : buildMageHero(cfg.color, cfg.color2);
     this.model = built.group;
     this.parts = built.parts;
+    this.mats = built.mats;
     this.model.position.set(cfg.startX, 0, this.startZ);
     scene.add(this.model);
     this.aimMesh = makeAimIndicator(cfg.color);
@@ -1034,7 +1023,7 @@ class Fighter {
       this.vy -= GRAVITY;
       this.y += this.vy;
       if (this.y <= 0) {
-        if (this.vy < -7) { SFX.land(); for (let i = 0; i < 8; i++) spawnSpark(this.x + rand(-20, 20), 6, this.z + rand(-20, 20), rand(-3, 3), rand(1, 3), rand(-3, 3), 18, 'rgba(190,200,230,0.9)', rand(5, 10), 0.3); }
+        if (this.vy < -7) { SFX.land(); for (let i = 0; i < 8; i++) spawnSpark(this.x + rand(-20, 20), 6, this.z + rand(-20, 20), rand(-3, 3), rand(1, 3), rand(-3, 3), 18, '#bec8e6', rand(5, 10), 0.3); }
         this.y = 0; this.vy = 0;
       }
     }
@@ -1169,7 +1158,7 @@ class Fighter {
     // 受击闪白
     const hurt = this.flash > 0 && (this.flash % 4 < 2);
     const e = hurt ? 0.85 : 0;
-    for (const m of heroMats) if (m.emissive) m.emissive.setRGB(e, e, e);
+    for (const m of this.mats) if (m.emissive) m.emissive.setRGB(e, e, e);
 
     // 残影
     this.drawGhosts();
@@ -1913,6 +1902,178 @@ function drawPaused() {
   ctx.textBaseline = 'alphabetic';
 }
 
+// ================= 2D 兼容渲染（无 WebGL 环境的回退方案） =================
+// 复用相机的投影把 3D 世界坐标画到 HUD 画布上，保证任何浏览器都能进游戏。
+function worldPx(x, y, z) {
+  const a = project(x, y, z), b = project(x + 1, y, z);
+  return Math.hypot(b.x - a.x, b.y - a.y) || 0.01;
+}
+function drawGlow(x, y, r, color, alpha) {
+  if (r < 0.5) return;
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, color);
+  g.addColorStop(0.4, color);
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.globalAlpha = alpha === undefined ? 1 : alpha;
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+  ctx.globalAlpha = 1;
+}
+function drawAim2D(f) {
+  if (!f.aimMesh.visible) return;
+  const len = f.type === 'sword' ? 340 : 620;
+  const wid = f.type === 'sword' ? 70 : 90;
+  const a = f.angle;
+  const p0 = project(f.x, 3, f.z);
+  const p1p = project(f.x + Math.sin(a) * len, 3, f.z + Math.cos(a) * len);
+  ctx.globalAlpha = 0.20;
+  ctx.strokeStyle = f.color; ctx.lineCap = 'round';
+  ctx.lineWidth = Math.max(3, wid * worldPx(f.x, 3, f.z) * 0.6);
+  ctx.beginPath(); ctx.moveTo(p0.x, p0.y); ctx.lineTo(p1p.x, p1p.y); ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+function drawFighter2D(f) {
+  const feet = project(f.x, f.y, f.z);
+  const top = project(f.x, f.y + 200, f.z);
+  const hgt = Math.max(24, feet.y - top.y);
+  const wid = hgt * 0.52;
+  const cx = (feet.x + top.x) / 2, cy = (feet.y + top.y) / 2;
+  const hurt = f.flash > 0 && (f.flash % 4 < 2);
+
+  // 落地阴影
+  const g0 = project(f.x, 0, f.z);
+  ctx.globalAlpha = 0.32; ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.ellipse(g0.x, g0.y, wid * 0.62, wid * 0.24, 0, 0, TAU); ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // 残影
+  for (const gh of f.ghosts) {
+    const gp = project(gh.x, 60, gh.z);
+    ctx.globalAlpha = (gh.life / 12) * 0.28;
+    ctx.fillStyle = f.color;
+    ctx.beginPath(); ctx.arc(gp.x, gp.y - hgt * 0.35, wid * 0.4, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  // 躯干
+  ctx.fillStyle = hurt ? '#ffffff' : f.color;
+  roundRect(-wid / 2, -hgt * 0.30, wid, hgt * 0.66, wid * 0.32); ctx.fill();
+  // 头
+  ctx.fillStyle = hurt ? '#ffffff' : '#f0c39c';
+  ctx.beginPath(); ctx.arc(0, -hgt * 0.40, wid * 0.36, 0, TAU); ctx.fill();
+  ctx.restore();
+
+  // 朝向 / 武器
+  const a = f.angle;
+  const dx = Math.sin(a), dy = Math.cos(a);
+  const swing = f.attackT > 0 ? (1 - f.attackT / (f.attackDur || 1)) : -1;
+  const baseX = cx + dx * wid * 0.5, baseY = cy + dy * wid * 0.5 - hgt * 0.1;
+  if (swing >= 0) {
+    // 出招弧光
+    const arc = clamp(swing / 0.72, 0, 1);
+    ctx.globalAlpha = 0.85 * (1 - arc * 0.6);
+    ctx.strokeStyle = hurt ? '#fff' : f.color2 || f.color;
+    ctx.lineWidth = Math.max(2, wid * 0.22);
+    ctx.beginPath();
+    ctx.arc(baseX, baseY, wid * (0.9 + arc * 0.6), Math.atan2(dy, dx) - 1.0, Math.atan2(dy, dx) + 0.7);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  } else {
+    ctx.strokeStyle = f.color2 || f.color;
+    ctx.lineWidth = Math.max(2, wid * 0.14);
+    ctx.beginPath(); ctx.moveTo(baseX, baseY);
+    ctx.lineTo(cx + dx * wid * 1.5, cy + dy * wid * 1.5 - hgt * 0.1); ctx.stroke();
+  }
+}
+function draw2DScene() {
+  // 天空
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#050818'); g.addColorStop(0.45, '#0d1536');
+  g.addColorStop(0.72, '#20214e'); g.addColorStop(1, '#2b2450');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  camera.updateMatrixWorld();
+
+  const X0 = -ARENA_HX, X1 = ARENA_HX, Z0 = -ARENA_HZ, Z1 = ARENA_HZ;
+  const c00 = project(X0, 0, Z0), c10 = project(X1, 0, Z0), c11 = project(X1, 0, Z1), c01 = project(X0, 0, Z1);
+
+  // 地板
+  ctx.beginPath();
+  ctx.moveTo(c00.x, c00.y); ctx.lineTo(c10.x, c10.y); ctx.lineTo(c11.x, c11.y); ctx.lineTo(c01.x, c01.y);
+  ctx.closePath();
+  ctx.fillStyle = '#141a34'; ctx.fill();
+
+  // 网格
+  ctx.strokeStyle = 'rgba(110,150,255,0.16)'; ctx.lineWidth = 1;
+  for (let x = X0; x <= X1 + 1; x += 155) {
+    const a = project(x, 0, Z0), b = project(x, 0, Z1);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  for (let z = Z0; z <= Z1 + 1; z += 155) {
+    const a = project(X0, 0, z), b = project(X1, 0, z);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }
+  // 中央符文圈
+  ctx.strokeStyle = 'rgba(120,170,255,0.25)'; ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (let i = 0; i <= 48; i++) {
+    const t = i / 48 * TAU, p = project(Math.cos(t) * 220, 0, Math.sin(t) * 220);
+    i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+  }
+  ctx.stroke();
+  // 四周光墙
+  ctx.strokeStyle = 'rgba(95,128,255,0.55)'; ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(c00.x, c00.y); ctx.lineTo(c10.x, c10.y); ctx.lineTo(c11.x, c11.y); ctx.lineTo(c01.x, c01.y);
+  ctx.closePath(); ctx.stroke();
+
+  // 技能指向
+  drawAim2D(p1); drawAim2D(p2);
+  // 地面冲击环
+  for (const r of rings) {
+    if (!r.active) continue;
+    const rad = r.m.scale.x;
+    const cc = project(r.m.position.x, 3, r.m.position.z);
+    const rx = Math.abs(project(r.m.position.x + rad, 0, r.m.position.z).x - cc.x);
+    if (rx < 1) continue;
+    ctx.globalAlpha = r.m.material.opacity;
+    ctx.strokeStyle = '#' + r.m.material.color.getHexString();
+    ctx.lineWidth = Math.max(1.5, rx * 0.10);
+    ctx.beginPath(); ctx.ellipse(cc.x, cc.y, rx, rx * 0.42, 0, 0, TAU); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // 角色（后画的覆盖前面的：按 z 从远到近）
+  const order = p1.z <= p2.z ? [p1, p2] : [p2, p1];
+  for (const f of order) drawFighter2D(f);
+
+  // 弹道
+  for (const pr of projectiles) {
+    const p = project(pr.x, pr.y, pr.z);
+    const k = worldPx(pr.x, pr.y, pr.z);
+    drawGlow(p.x, p.y, Math.max(4, pr.r * k * 1.6), pr.color, 0.9);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(2, pr.r * k * 0.9), 0, TAU); ctx.fill();
+  }
+  // 火花
+  for (const s of sparks) {
+    if (!s.active) continue;
+    const sp = s.s.position;
+    const p = project(sp.x, sp.y, sp.z);
+    const k = worldPx(sp.x, sp.y, sp.z);
+    drawGlow(p.x, p.y, Math.max(1.5, s.s.scale.x * k * 0.9), '#' + s.s.material.color.getHexString(), s.s.material.opacity);
+  }
+
+  // 兼容模式标记
+  ctx.font = 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(180,200,255,0.55)';
+  ctx.fillText('2D 兼容模式（当前环境不支持 WebGL）', 16, H - 18);
+  ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+}
+
 // ================= 渲染 =================
 function render() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -1923,7 +2084,7 @@ function render() {
   p2.hpDisplay += (p2.hp - p2.hpDisplay) * 0.14;
 
   updateCamera();
-  renderer.render(scene, camera);
+  if (use2D) draw2DScene(); else renderer.render(scene, camera);
 
   if (gameState === 'menu') { drawMenu(); return; }
   drawHUD();
