@@ -2275,24 +2275,29 @@ function fixedUpdate() {
 }
 
 // ================= 相机跟随 =================
+// 镜头始终以本机操控的英雄为中心（humans[0] 即本地操控的角色）；
+// 该英雄阵亡时，平滑过渡到存活队友的重心，避免镜头停在空处。
 const _mid = new THREE.Vector3();
 function updateCamera() {
-  let sx = 0, sz = 0;
-  let list = fighters.filter(f => !f.dead);
-  if (!list.length) list = fighters;
-  let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
-  for (const f of list) {
-    sx += f.x; sz += f.z;
-    minX = Math.min(minX, f.x); maxX = Math.max(maxX, f.x);
-    minZ = Math.min(minZ, f.z); maxZ = Math.max(maxZ, f.z);
+  const focus = humans[0] || null;
+  let fx, fz;
+  if (focus && !focus.dead) {
+    fx = focus.x; fz = focus.z;
+  } else {
+    const team = focus ? alliesOf(focus) : fighters;
+    const alive = team.filter(f => !f.dead);
+    if (alive.length) {
+      let ax = 0, az = 0;
+      for (const f of alive) { ax += f.x; az += f.z; }
+      fx = ax / alive.length; fz = az / alive.length;
+    } else if (focus) { fx = focus.x; fz = focus.z; }
+    else { fx = 0; fz = 0; }
   }
-  const midX = sx / list.length, midZ = sz / list.length;
-  const spread = Math.max(maxX - minX, maxZ - minZ);
-  const D = clamp(1050 + Math.max(0, spread - 560) * 0.62, 1050, 2900);
-  let tx = midX, tz = midZ + D * 0.62, ty = D * 0.80;
+  const D = 1000;
+  let tx = fx, tz = fz + D * 0.62, ty = D * 0.80;
   if (shakeT > 0) { const k = shakeMag * (shakeT / 14); tx += rand(-1, 1) * k * 4; ty += rand(-1, 1) * k * 4; tz += rand(-1, 1) * k * 4; }
   camera.position.lerp(_mid.set(tx, ty, tz), 0.12);
-  camera.lookAt(midX, 30, midZ);
+  camera.lookAt(fx, 30, fz);
 }
 
 // ================= HUD 绘制（2D 覆盖层） =================
