@@ -43,19 +43,16 @@
 const W = 1280, H = 720;
 const TAU = Math.PI * 2;
 const GRAVITY = 0.9;              // 竖直方向重力（每帧）
-const ARENA_HX = 620, ARENA_HZ = 460;   // 竞技场半宽（x 轴）/ 半深（z 轴）
+const ARENA_HX = 900, ARENA_HZ = 680;   // 竞技场半宽（x 轴）/ 半深（z 轴）
 const BODY_R = 30;                // 角色水平碰撞半径
 const GROUND_Y = 0;
+const SPAWN_X = 430;              // 双方出生点 x 坐标（±，对称）
+const GROUND_TEX_HALF = 1600;     // 地面纹理半宽（512px）对应的世界距离（地面平面 3200）
 
-// 地图障碍物（静态方块，hx/hz 为半宽，h 为高度）
-const OBSTACLES = [
-  { x: -260, z: -300, hx: 100, hz: 68, h: 82 },
-  { x:  260, z: -300, hx: 100, hz: 68, h: 82 },
-  { x: -260, z:  300, hx: 100, hz: 68, h: 82 },
-  { x:  260, z:  300, hx: 100, hz: 68, h: 82 },
-  { x: -470, z:  120, hx: 64,  hz: 110, h: 70 },
-  { x:  470, z: -120, hx: 64,  hz: 110, h: 70 },
-];
+// 地图障碍物：每局随机生成（hx/hz 为半宽，h 为高度）
+let OBSTACLES = [];
+let obstacleMeshes = [];
+let obstacleVer = 0;
 
 const rand = (a, b) => a + Math.random() * (b - a);
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
@@ -331,7 +328,7 @@ try {
 }
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x0a1030, 1500, 3400);
+scene.fog = new THREE.Fog(0x0a1030, 1900, 4800);
 
 const camera = new THREE.PerspectiveCamera(48, W / H, 1, 6000);
 camera.position.set(0, 780, 520);
@@ -344,9 +341,9 @@ const sun = new THREE.DirectionalLight(0xffffff, 1.05);
 sun.position.set(420, 900, 320);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.camera.near = 100; sun.shadow.camera.far = 2600;
-sun.shadow.camera.left = -900; sun.shadow.camera.right = 900;
-sun.shadow.camera.top = 900; sun.shadow.camera.bottom = -900;
+sun.shadow.camera.near = 100; sun.shadow.camera.far = 3400;
+sun.shadow.camera.left = -1250; sun.shadow.camera.right = 1250;
+sun.shadow.camera.top = 1250; sun.shadow.camera.bottom = -1250;
 sun.shadow.bias = -0.0009;
 scene.add(sun);
 const rim = new THREE.DirectionalLight(0x6f8fff, 0.45);
@@ -406,8 +403,8 @@ function makeGroundTexture() {
     b.beginPath(); b.moveTo(0, i); b.lineTo(1024, i); b.stroke();
   }
   // 场地边框（对应世界 ARENA_HX / HZ）
-  const px = u => 512 + u / 1200 * 512;      // 世界单位 → 纹理像素（地面平面 2400 宽）
-  const pz = u => 512 + u / 1200 * 512;
+  const px = u => 512 + u / GROUND_TEX_HALF * 512;   // 世界单位 → 纹理像素
+  const pz = u => 512 + u / GROUND_TEX_HALF * 512;
   b.strokeStyle = 'rgba(150,190,255,0.55)'; b.lineWidth = 5;
   b.strokeRect(px(-ARENA_HX), pz(-ARENA_HZ), px(ARENA_HX) - px(-ARENA_HX), pz(ARENA_HZ) - pz(-ARENA_HZ));
   b.strokeStyle = 'rgba(120,160,255,0.22)'; b.lineWidth = 14;
@@ -418,12 +415,12 @@ function makeGroundTexture() {
   for (let i = 0; i < 3; i++) {
     b.globalAlpha = 0.30 - i * 0.07;
     b.strokeStyle = '#8fb8ff'; b.lineWidth = 3;
-    b.beginPath(); b.arc(0, 0, (110 + i * 90) / 1200 * 512, 0, TAU); b.stroke();
+    b.beginPath(); b.arc(0, 0, (140 + i * 115) / GROUND_TEX_HALF * 512, 0, TAU); b.stroke();
   }
   b.globalAlpha = 0.5;
   b.strokeStyle = '#8fb8ff'; b.lineWidth = 2;
-  b.beginPath(); b.moveTo(-90, 0); b.lineTo(90, 0); b.stroke();
-  b.beginPath(); b.moveTo(0, -90); b.lineTo(0, 90); b.stroke();
+  b.beginPath(); b.moveTo(-120, 0); b.lineTo(120, 0); b.stroke();
+  b.beginPath(); b.moveTo(0, -120); b.lineTo(0, 120); b.stroke();
   b.restore();
   b.globalAlpha = 1;
   // 障碍物底座标记
@@ -431,7 +428,7 @@ function makeGroundTexture() {
   b.strokeStyle = 'rgba(150,190,255,0.45)'; b.lineWidth = 2;
   for (const o of OBSTACLES) {
     const cx = px(o.x), cz = pz(o.z);
-    const hw = o.hx / 1200 * 512, hd = o.hz / 1200 * 512;
+    const hw = o.hx / GROUND_TEX_HALF * 512, hd = o.hz / GROUND_TEX_HALF * 512;
     b.fillRect(cx - hw, cz - hd, hw * 2, hd * 2);
     b.strokeRect(cx - hw, cz - hd, hw * 2, hd * 2);
   }
@@ -440,7 +437,7 @@ function makeGroundTexture() {
   return t;
 }
 const groundMat = new THREE.MeshStandardMaterial({ map: makeGroundTexture(), roughness: 1, metalness: 0 });
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(2400, 2400), groundMat);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(GROUND_TEX_HALF * 2, GROUND_TEX_HALF * 2), groundMat);
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
@@ -456,20 +453,77 @@ addWall(0, ARENA_HZ, ARENA_HX * 2, 14);
 addWall(-ARENA_HX, 0, 14, ARENA_HZ * 2);
 addWall(ARENA_HX, 0, 14, ARENA_HZ * 2);
 
-// ---- 地图障碍物（3D） ----
+// ---- 地图障碍物（3D，每局随机重建） ----
 const obsTopMat = new THREE.MeshStandardMaterial({ color: 0x3b4a86, roughness: 0.85, metalness: 0.1, emissive: 0x121c3d, emissiveIntensity: 0.7 });
 const obsSideMat = new THREE.MeshStandardMaterial({ color: 0x232c55, roughness: 1, metalness: 0 });
 const obsEdgeMat = new THREE.MeshBasicMaterial({ color: 0x6f8fff, transparent: true, opacity: 0.35 });
-for (const o of OBSTACLES) {
-  const box = new THREE.Mesh(new THREE.BoxGeometry(o.hx * 2, o.h, o.hz * 2),
-    [obsSideMat, obsSideMat, obsTopMat, obsSideMat, obsSideMat, obsSideMat]);
-  box.position.set(o.x, o.h / 2, o.z);
-  box.castShadow = true; box.receiveShadow = true;
-  scene.add(box);
-  const edge = new THREE.Mesh(new THREE.BoxGeometry(o.hx * 2 + 6, 4, o.hz * 2 + 6), obsEdgeMat);
-  edge.position.set(o.x, o.h, o.z);
-  scene.add(edge);
+
+function buildObstacleMeshes() {
+  for (const m of obstacleMeshes) { scene.remove(m); m.geometry.dispose(); }
+  obstacleMeshes = [];
+  for (const o of OBSTACLES) {
+    const box = new THREE.Mesh(new THREE.BoxGeometry(o.hx * 2, o.h, o.hz * 2),
+      [obsSideMat, obsSideMat, obsTopMat, obsSideMat, obsSideMat, obsSideMat]);
+    box.position.set(o.x, o.h / 2, o.z);
+    box.castShadow = true; box.receiveShadow = true;
+    scene.add(box); obstacleMeshes.push(box);
+    const edge = new THREE.Mesh(new THREE.BoxGeometry(o.hx * 2 + 6, 4, o.hz * 2 + 6), obsEdgeMat);
+    edge.position.set(o.x, o.h, o.z);
+    scene.add(edge); obstacleMeshes.push(edge);
+  }
 }
+
+// 点到矩形（含半宽 hx/hz）的最短距离
+function pointRectDist(px, pz, o) {
+  const dx = Math.max(0, Math.abs(px - o.x) - o.hx);
+  const dz = Math.max(0, Math.abs(pz - o.z) - o.hz);
+  return Math.hypot(dx, dz);
+}
+// 两矩形（带间距 pad）是否重叠
+function rectsOverlap(a, b, pad) {
+  return Math.abs(a.x - b.x) < a.hx + b.hx + pad && Math.abs(a.z - b.z) < a.hz + b.hz + pad;
+}
+
+// 随机生成障碍布局：点对称，保证双方公平；避开出生点与中央符文区
+function generateLayout() {
+  const pairs = randInt(3, 4);
+  const list = [];
+  let tries = 0;
+  while (list.length < pairs && tries < 800) {
+    tries++;
+    const hx = rand(70, 130), hz = rand(60, 120);
+    const o = {
+      x: rand(210, ARENA_HX - hx - 90),
+      z: rand(-(ARENA_HZ - hz - 90), ARENA_HZ - hz - 90),
+      hx: hx, hz: hz, h: rand(64, 100)
+    };
+    if (Math.hypot(o.x, o.z) < 400) continue;                 // 中央保护区
+    if (pointRectDist(SPAWN_X, 0, o) < 220) continue;          // 出生点净空
+    let bad = false;
+    for (const q of list) {
+      if (rectsOverlap(o, q, 150) || rectsOverlap(o, { x: -q.x, z: -q.z, hx: q.hx, hz: q.hz }, 150)) { bad = true; break; }
+    }
+    if (bad) continue;
+    list.push(o);
+  }
+  // 镜像出另一半（点对称）
+  return list.concat(list.map(o => ({ x: -o.x, z: -o.z, hx: o.hx, hz: o.hz, h: o.h })));
+}
+
+// 应用一套障碍布局：刷新地面纹理与 3D 网格
+function applyObstacleLayout(arr) {
+  OBSTACLES = arr;
+  if (groundMat.map) groundMat.map.dispose();
+  groundMat.map = makeGroundTexture();
+  groundMat.needsUpdate = true;
+  buildObstacleMeshes();
+}
+// 每局随机重开
+function regenerateObstacles() {
+  applyObstacleLayout(generateLayout());
+  obstacleVer++;
+}
+regenerateObstacles();
 
 // ================= 特效：火花精灵池 + 冲击环池 =================
 function makeSparkTexture() {
@@ -1347,6 +1401,7 @@ const net = {
   rtt: 0,
   pingSent: 0,
   guestPick: -1,
+  sentObstacleVer: -1,
   send(o) {
     if (this.dc && this.dc.readyState === 'open') { try { this.dc.send(JSON.stringify(o)); } catch (e) { } }
   }
@@ -1444,6 +1499,7 @@ function applySnapshot(s) {
   applyFighterState(p1, s.f[0]);
   applyFighterState(p2, s.f[1]);
   netSyncProjectiles(s.pj || []);
+  if (s.obs) applyObstacleLayout(s.obs.map(a => ({ x: a[0], z: a[1], hx: a[2], hz: a[3], h: a[4] })));
   if (s.uc) {
     p1.upgradeCounts = s.uc[0]; p2.upgradeCounts = s.uc[1];
     p1.upgrades = new Array(upgradesTotal(p1.upgradeCounts));
@@ -1472,6 +1528,11 @@ function netHostSend() {
     pj: projectiles.map(p => [p.__id, Math.round(p.x), Math.round(p.y), Math.round(p.z), p.type, p.color, p.r]),
     ev: net.events
   };
+  // 障碍布局变更时随快照下发（保持两端一致）
+  if (net.sentObstacleVer !== obstacleVer) {
+    snap.obs = OBSTACLES.map(o => [Math.round(o.x), Math.round(o.z), Math.round(o.hx), Math.round(o.hz), Math.round(o.h)]);
+    net.sentObstacleVer = obstacleVer;
+  }
   if (gameState === 'upgrade') {
     snap.up = { ph: upgradePhase, sel: upgradeSel, c: [upgradeChoices[0].map(u => u.id), upgradeChoices[1].map(u => u.id)] };
     snap.uc = [p1.upgradeCounts, p2.upgradeCounts];
@@ -1563,6 +1624,7 @@ function netOnMessage(m) {
 function netOnConnected() {
   net.active = true;
   net.events = []; net.guestPick = -1; net.inputSeq = 0; net.remoteSeq = -1;
+  net.sentObstacleVer = -1;
   net.held = { up: false, down: false, left: false, right: false };
   net.edges = { attack: false, skills: p2.skills.map(() => false) };
   p2.ai = null;
@@ -1579,6 +1641,7 @@ function startNetMatch() {
   p1.resetMods(); p2.resetMods();
   wins = [0, 0]; round = 1;
   net.events = []; net.guestPick = -1;
+  regenerateObstacles();               // 主机生成，随后随快照同步给客户端
   Music.duck = 1; Music.play('battle'); Music.apply(0.3);
   startRound();
 }
@@ -1738,12 +1801,12 @@ let aiLevel = null;
 
 const p1 = new Fighter({
   name: '烈焰剑客', color: '#ff5a5f', color2: '#a81f38', type: 'sword',
-  maxHp: 220, speed: 5.9, side: 0, startX: -330, startZ: 0, startAngle: Math.PI / 2,
+  maxHp: 220, speed: 5.9, side: 0, startX: -SPAWN_X, startZ: 0, startAngle: Math.PI / 2,
   controls: { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', attack: 'KeyF' }
 });
 const p2 = new Fighter({
   name: '秘法星灵', color: '#4fa8ff', color2: '#1b4f9e', type: 'mage',
-  maxHp: 200, speed: 4.7, side: 1, startX: 330, startZ: 0, startAngle: -Math.PI / 2,
+  maxHp: 200, speed: 4.7, side: 1, startX: SPAWN_X, startZ: 0, startAngle: -Math.PI / 2,
   controls: { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', attack: 'KeyK' }
 });
 
@@ -1765,6 +1828,7 @@ function startMatch(modeIdx) {
   p2.dmgMul = aiLevel ? DIFFS[aiLevel].dmg : 1;
   p1.resetMods(); p2.resetMods();
   wins = [0, 0]; round = 1;
+  regenerateObstacles();
   Music.duck = 1; Music.play('battle'); Music.apply(0.3);
   startRound();
 }
@@ -1945,7 +2009,7 @@ const _mid = new THREE.Vector3();
 function updateCamera() {
   const midX = (p1.x + p2.x) / 2, midZ = (p1.z + p2.z) / 2;
   const sep = Math.hypot(p1.x - p2.x, p1.z - p2.z);
-  const D = clamp(820 + Math.max(0, sep - 320) * 1.1, 820, 1250);
+  const D = clamp(900 + Math.max(0, sep - 360) * 1.15, 900, 2050);
   let tx = midX, tz = midZ + D * 0.62, ty = D * 0.80;
   if (shakeT > 0) { const k = shakeMag * (shakeT / 14); tx += rand(-1, 1) * k * 4; ty += rand(-1, 1) * k * 4; tz += rand(-1, 1) * k * 4; }
   camera.position.lerp(_mid.set(tx, ty, tz), 0.12);
@@ -2079,10 +2143,57 @@ function drawOverhead() {
   }
 }
 
+// 小地图：俯瞰整个竞技场（障碍物 + 双方位置与朝向）
+function drawMinimap() {
+  const mw = 240, mh = mw * ARENA_HZ / ARENA_HX;
+  const x0 = W - 40 - mw, y0 = H - 62 - mh;
+  const mx = x => x0 + (x + ARENA_HX) / (2 * ARENA_HX) * mw;
+  const mz = z => y0 + (z + ARENA_HZ) / (2 * ARENA_HZ) * mh;
+
+  ctx.fillStyle = 'rgba(6,9,22,0.72)';
+  roundRect(x0 - 8, y0 - 8, mw + 16, mh + 16, 10); ctx.fill();
+  ctx.strokeStyle = 'rgba(140,170,240,0.45)'; ctx.lineWidth = 2;
+  roundRect(x0 - 8, y0 - 8, mw + 16, mh + 16, 10); ctx.stroke();
+
+  ctx.fillStyle = 'rgba(30,40,80,0.55)';
+  roundRect(x0, y0, mw, mh, 5); ctx.fill();
+  ctx.strokeStyle = 'rgba(120,160,255,0.35)'; ctx.lineWidth = 1.5;
+  roundRect(x0, y0, mw, mh, 5); ctx.stroke();
+
+  ctx.fillStyle = 'rgba(150,190,255,0.30)';
+  ctx.beginPath(); ctx.arc(mx(0), mz(0), 3, 0, TAU); ctx.fill();
+
+  // 障碍物
+  ctx.fillStyle = 'rgba(120,160,255,0.78)';
+  for (const o of OBSTACLES) {
+    ctx.fillRect(mx(o.x - o.hx), mz(o.z - o.hz), o.hx / ARENA_HX * mw, o.hz / ARENA_HZ * mh);
+  }
+
+  // 双方标记（圆点 + 朝向指示）
+  for (const f of [p1, p2]) {
+    const px = mx(f.x), pz = mz(f.z);
+    ctx.strokeStyle = f.color; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(px, pz);
+    ctx.lineTo(px + Math.sin(f.angle) * 12, pz + Math.cos(f.angle) * 12);
+    ctx.stroke();
+    ctx.fillStyle = f.color;
+    ctx.beginPath(); ctx.arc(px, pz, 5, 0, TAU); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(px, pz, 5, 0, TAU); ctx.stroke();
+  }
+
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold 12px "PingFang SC",sans-serif';
+  ctx.fillStyle = 'rgba(170,190,225,0.7)';
+  ctx.fillText('小地图', x0 + 2, y0 - 14);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+}
+
 function drawHUD() {
   drawHealthBar(p1, true);
   drawHealthBar(p2, false);
   drawOverhead();
+  drawMinimap();
 
   const sec = Math.ceil(roundTime / 60);
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -2537,7 +2648,7 @@ function draw2DScene() {
   ctx.strokeStyle = 'rgba(120,170,255,0.25)'; ctx.lineWidth = 3;
   ctx.beginPath();
   for (let i = 0; i <= 48; i++) {
-    const t = i / 48 * TAU, p = project(Math.cos(t) * 220, 0, Math.sin(t) * 220);
+    const t = i / 48 * TAU, p = project(Math.cos(t) * 370, 0, Math.sin(t) * 370);
     i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
   }
   ctx.stroke();
