@@ -43,11 +43,14 @@
 const W = 1280, H = 720;
 const TAU = Math.PI * 2;
 const GRAVITY = 0.9;              // 竖直方向重力（每帧）
-const ARENA_HX = 900, ARENA_HZ = 680;   // 竞技场半宽（x 轴）/ 半深（z 轴）
+const ARENA_HX = 1800, ARENA_HZ = 1360;  // 竞技场半宽（x 轴）/ 半深（z 轴）
 const BODY_R = 30;                // 角色水平碰撞半径
 const GROUND_Y = 0;
-const SPAWN_X = 430;              // 双方出生点 x 坐标（±，对称）
-const GROUND_TEX_HALF = 1600;     // 地面纹理半宽（512px）对应的世界距离（地面平面 3200）
+const SPAWN_X = 620;              // 双方出生基地 x 坐标（±，对称）
+const GROUND_TEX_HALF = 2200;     // 地面纹理半宽（512px）对应的世界距离（地面平面 4400）
+const TEAM_SIZE = 5, TEAM_RED = 0, TEAM_BLUE = 1;
+const RESPAWN_TIME = 300;         // 阵亡后复活所需帧数（5 秒）
+const SLOT_Z = [0, -420, 420, -210, 210];   // 队内 5 个出生位的 z 偏移
 
 // 地图障碍物：每局随机生成（hx/hz 为半宽，h 为高度）
 let OBSTACLES = [];
@@ -328,10 +331,10 @@ try {
 }
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x0a1030, 1900, 4800);
+scene.fog = new THREE.Fog(0x0a1030, 2600, 6600);
 
-const camera = new THREE.PerspectiveCamera(48, W / H, 1, 6000);
-camera.position.set(0, 780, 520);
+const camera = new THREE.PerspectiveCamera(48, W / H, 1, 9000);
+camera.position.set(0, 900, 620);
 camera.lookAt(0, 0, 0);
 
 // ---- 光照 ----
@@ -341,9 +344,9 @@ const sun = new THREE.DirectionalLight(0xffffff, 1.05);
 sun.position.set(420, 900, 320);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.camera.near = 100; sun.shadow.camera.far = 3400;
-sun.shadow.camera.left = -1250; sun.shadow.camera.right = 1250;
-sun.shadow.camera.top = 1250; sun.shadow.camera.bottom = -1250;
+sun.shadow.camera.near = 100; sun.shadow.camera.far = 5200;
+sun.shadow.camera.left = -2100; sun.shadow.camera.right = 2100;
+sun.shadow.camera.top = 2100; sun.shadow.camera.bottom = -2100;
 sun.shadow.bias = -0.0009;
 scene.add(sun);
 const rim = new THREE.DirectionalLight(0x6f8fff, 0.45);
@@ -415,12 +418,12 @@ function makeGroundTexture() {
   for (let i = 0; i < 3; i++) {
     b.globalAlpha = 0.30 - i * 0.07;
     b.strokeStyle = '#8fb8ff'; b.lineWidth = 3;
-    b.beginPath(); b.arc(0, 0, (140 + i * 115) / GROUND_TEX_HALF * 512, 0, TAU); b.stroke();
+    b.beginPath(); b.arc(0, 0, (200 + i * 160) / GROUND_TEX_HALF * 512, 0, TAU); b.stroke();
   }
   b.globalAlpha = 0.5;
   b.strokeStyle = '#8fb8ff'; b.lineWidth = 2;
-  b.beginPath(); b.moveTo(-120, 0); b.lineTo(120, 0); b.stroke();
-  b.beginPath(); b.moveTo(0, -120); b.lineTo(0, 120); b.stroke();
+  b.beginPath(); b.moveTo(-170, 0); b.lineTo(170, 0); b.stroke();
+  b.beginPath(); b.moveTo(0, -170); b.lineTo(0, 170); b.stroke();
   b.restore();
   b.globalAlpha = 1;
   // 障碍物底座标记
@@ -431,6 +434,16 @@ function makeGroundTexture() {
     const hw = o.hx / GROUND_TEX_HALF * 512, hd = o.hz / GROUND_TEX_HALF * 512;
     b.fillRect(cx - hw, cz - hd, hw * 2, hd * 2);
     b.strokeRect(cx - hw, cz - hd, hw * 2, hd * 2);
+  }
+  // 双方基地区域
+  for (const side of [-1, 1]) {
+    const bx = px(side * SPAWN_X), bz = pz(0);
+    const hw = 260 / GROUND_TEX_HALF * 512, hd = 620 / GROUND_TEX_HALF * 512;
+    b.fillStyle = side < 0 ? 'rgba(255,90,95,0.10)' : 'rgba(79,168,255,0.10)';
+    b.fillRect(bx - hw, bz - hd, hw * 2, hd * 2);
+    b.strokeStyle = side < 0 ? 'rgba(255,90,95,0.5)' : 'rgba(79,168,255,0.5)';
+    b.lineWidth = 3;
+    b.strokeRect(bx - hw, bz - hd, hw * 2, hd * 2);
   }
   const t = new THREE.CanvasTexture(c);
   t.anisotropy = 4;
@@ -484,24 +497,24 @@ function rectsOverlap(a, b, pad) {
   return Math.abs(a.x - b.x) < a.hx + b.hx + pad && Math.abs(a.z - b.z) < a.hz + b.hz + pad;
 }
 
-// 随机生成障碍布局：点对称，保证双方公平；避开出生点与中央符文区
+// 随机生成障碍布局：点对称，保证双方公平；避开双方基地与中央符文区
 function generateLayout() {
-  const pairs = randInt(3, 4);
+  const pairs = randInt(4, 7);
   const list = [];
   let tries = 0;
-  while (list.length < pairs && tries < 800) {
+  while (list.length < pairs && tries < 1400) {
     tries++;
-    const hx = rand(70, 130), hz = rand(60, 120);
+    const hx = rand(80, 150), hz = rand(70, 140);
     const o = {
-      x: rand(210, ARENA_HX - hx - 90),
-      z: rand(-(ARENA_HZ - hz - 90), ARENA_HZ - hz - 90),
-      hx: hx, hz: hz, h: rand(64, 100)
+      x: rand(430, ARENA_HX - hx - 140),
+      z: rand(-(ARENA_HZ - hz - 140), ARENA_HZ - hz - 140),
+      hx: hx, hz: hz, h: rand(70, 112)
     };
-    if (Math.hypot(o.x, o.z) < 400) continue;                 // 中央保护区
-    if (pointRectDist(SPAWN_X, 0, o) < 220) continue;          // 出生点净空
+    if (Math.hypot(o.x, o.z) < 720) continue;                              // 中央保护区
+    if (Math.abs(o.x - SPAWN_X) < o.hx + 320 && Math.abs(o.z) < o.hz + 560) continue;   // 基地净空（镜像自动对称）
     let bad = false;
     for (const q of list) {
-      if (rectsOverlap(o, q, 150) || rectsOverlap(o, { x: -q.x, z: -q.z, hx: q.hx, hz: q.hz }, 150)) { bad = true; break; }
+      if (rectsOverlap(o, q, 220) || rectsOverlap(o, { x: -q.x, z: -q.z, hx: q.hx, hz: q.hz }, 220)) { bad = true; break; }
     }
     if (bad) continue;
     list.push(o);
@@ -682,12 +695,16 @@ class EnemyAI {
   reset() {
     this.t = 0; this.aimT = 0; this.reactCd = 0; this.decideCd = 0; this.step = 0; this.stepDir = 1; this.actCd = 0;
   }
-  think(self, opp, prs) {
+  think(self, prs) {
     const p = this.p;
     const out = { up: false, down: false, left: false, right: false, attack: false, skills: [false, false] };
     this.t++;
     if (this.reactCd > 0) this.reactCd--;
     if (this.actCd > 0) this.actCd--;
+
+    const opp = nearestEnemy(self);       // 就近选择敌方目标
+    self.aiTarget = opp;
+    if (!opp) return out;
 
     const dx = opp.x - self.x, dz = opp.z - self.z;
     const dist = Math.hypot(dx, dz) || 1;
@@ -696,7 +713,7 @@ class EnemyAI {
     // ---------- 1. 闪避：来袭弹道 ----------
     let threat = null, threatDist = 1e9;
     for (const pr of prs) {
-      if (pr.owner === self) continue;
+      if (pr.owner && pr.owner.side === self.side) continue;   // 只闪避敌方弹道
       const rx = self.x - pr.x, rz = self.z - pr.z;
       const toward = (pr.vx * rx + pr.vz * rz) > 0;   // 弹道是否朝自己飞来
       const pd = Math.hypot(rx, rz);
@@ -758,13 +775,21 @@ class EnemyAI {
       }
     }
 
+    // 友军分离：避免 AI 队友互相堆叠
+    for (const a of alliesOf(self)) {
+      if (a === self || a.dead) continue;
+      const ax = self.x - a.x, az = self.z - a.z;
+      const ad = Math.hypot(ax, az);
+      if (ad > 0.001 && ad < 92) { mx += ax / ad; mz += az / ad; }
+    }
+
     if (mx > 0.25) out.right = true; else if (mx < -0.25) out.left = true;
     if (mz > 0.25) out.down = true; else if (mz < -0.25) out.up = true;
 
     // ---------- 3. 普通攻击 ----------
     const range = self.type === 'sword' ? 150 : 620;
     if (dist <= range) this.aimT++; else this.aimT = 0;
-    const hittable = opp.y <= 0.01 && opp.dashT <= 0 && opp.invuln <= 0;
+    const hittable = opp.y <= 0.01 && opp.dashT <= 0 && opp.invuln <= 0 && !opp.dead;
 
     if (!dodging && dist <= range && self.attackCd <= 0 && self.attackT <= 0 && this.aimT >= p.react) {
       let fire = false;
@@ -787,6 +812,21 @@ class EnemyAI {
     return out;
   }
 }
+
+// ================= 队伍与目标辅助 =================
+function alliesOf(f) { return f.side === TEAM_RED ? redTeam : blueTeam; }
+function enemiesOf(f) { return f.side === TEAM_RED ? blueTeam : redTeam; }
+function nearestEnemy(f) {
+  const list = enemiesOf(f);
+  let best = null, bd = 1e9;
+  for (const e of list) {
+    if (e.dead) continue;
+    const d = distXZ(f, e);
+    if (d < bd) { bd = d; best = e; }
+  }
+  return best;
+}
+function teamAlive(side) { const t = side === TEAM_RED ? redTeam : blueTeam; return t.some(f => !f.dead); }
 
 // ================= 技能与连招表 =================
 const SKILLS = {
@@ -822,14 +862,11 @@ const UPGRADES = [
     apply(f) { f.mods.power += 0.20; } },
   { id: 'range', name: '扩张法阵', tier: 1, desc: '技能范围 +18%',
     apply(f) { f.mods.range += 0.18; } },
-  { id: 's0', name: '精通·一技能', tier: 2,
-    desc: f => '「' + f.skills[0].label + '」伤害 +30%、冷却 -10%',
+  { id: 's0', name: '精通·一技能', tier: 2, desc: '一技能伤害 +30%、冷却 -10%',
     apply(f) { f.mods.skillPower[0] += 0.30; f.mods.skillCd[0] = Math.max(0.4, f.mods.skillCd[0] * 0.9); } },
-  { id: 's1', name: '精通·二技能', tier: 2,
-    desc: f => '「' + f.skills[1].label + '」伤害 +35%',
+  { id: 's1', name: '精通·二技能', tier: 2, desc: '二技能伤害 +35%',
     apply(f) { f.mods.skillPower[1] += 0.35; } },
-  { id: 's1cd', name: '急速·二技能', tier: 2,
-    desc: f => '「' + f.skills[1].label + '」冷却 -25%',
+  { id: 's1cd', name: '急速·二技能', tier: 2, desc: '二技能冷却 -25%',
     apply(f) { f.mods.skillCd[1] = Math.max(0.4, f.mods.skillCd[1] * 0.75); } },
   { id: 'atk', name: '利刃共鸣', tier: 1, desc: '普通攻击伤害 +18%',
     apply(f) { f.mods.atk += 0.18; } },
@@ -843,8 +880,8 @@ const UPGRADES = [
     apply(f) { f.mods.finisher += 0.45; } }
 ];
 const UPGRADE_MAX = 3;
-function rollUpgrades(f) {
-  const bag = UPGRADES.filter(u => (f.upgradeCounts[u.id] || 0) < UPGRADE_MAX);
+function rollTeamUpgrades(ts) {
+  const bag = UPGRADES.filter(u => (ts.upgradeCounts[u.id] || 0) < UPGRADE_MAX);
   const out = [];
   while (out.length < 3 && bag.length) {
     out.push(bag.splice(Math.floor(Math.random() * bag.length), 1)[0]);
@@ -1000,9 +1037,13 @@ class Fighter {
     this.startZ = cfg.startZ || 0;
     this.startAngle = cfg.startAngle;
     this.radius = BODY_R;
+    this.slot = cfg.slot || 0;
+    this.index = cfg.index || 0;
     this.dmg = cfg.type === 'sword' ? 12 : 8;
     this.ai = null;
+    this.netPeer = null;               // 联机：该角色由哪个远端客户端操控
     this.dmgMul = 1;
+    this.kills = 0;
     this.baseMaxHp = cfg.maxHp;
     this.skills = SKILLS[cfg.type];
     this.resetMods();
@@ -1047,12 +1088,21 @@ class Fighter {
     this.novaT = 0;
     this.walkPhase = 0;
     this.ghosts = [];
+    this.dead = false; this.respawnT = 0;
+    this.opp = null; this.aiTarget = null;
+    this.kills = 0;
+    this.model.visible = true;
+    this.aimMesh.visible = false;
     this.model.position.set(this.x, 0, this.z);
     this.model.rotation.set(0, this.angle, 0);
   }
 
-  update(opp) {
+  update() {
     if (this.flash > 0) this.flash--;
+    if (this.dead) {                       // 阵亡：等待复活
+      if (this.respawnT > 0) { this.respawnT--; if (this.respawnT === 0) this.respawn(); }
+      return;
+    }
     if (this.attackCd > 0) this.attackCd--;
     for (let i = 0; i < this.cds.length; i++) {
       if (this.cds[i] > 0) { this.cds[i]--; if (this.cds[i] === 0) SFX.ready(); }
@@ -1063,6 +1113,9 @@ class Fighter {
     if (this.novaT > 0) this.novaT--;
     if (this.comboT > 0) { this.comboT--; if (this.comboT === 0) this.combo = 0; }
     this.animT++;
+
+    const opp = nearestEnemy(this);        // 就近锁定敌方目标
+    this.opp = opp;
 
     const grounded = this.y <= 0.01;
     const canAct = this.hitStun <= 0 && this.dashT <= 0 && gameState === 'fight' && grounded;
@@ -1092,11 +1145,11 @@ class Fighter {
 
       if (this.attackT <= 0) {
         if (mlen > 0) this.targetAngle = Math.atan2(mx, mz);
-        else { const d = distXZ(this, opp); if (d > 4) this.targetAngle = aimAt(this, opp); }
+        else if (opp) { const d = distXZ(this, opp); if (d > 4) this.targetAngle = aimAt(this, opp); }
       }
-      if (inp.attack && this.attackCd <= 0 && this.attackT <= 0) this.doAttack(opp);
+      if (inp.attack && this.attackCd <= 0 && this.attackT <= 0 && opp) this.doAttack(opp);
       for (let i = 0; i < this.skills.length; i++) {
-        if (inp.skills[i] && this.cds[i] <= 0 && this.attackT <= 0 && this.dashT <= 0) this.castSkill(i, opp);
+        if (inp.skills[i] && this.cds[i] <= 0 && this.attackT <= 0 && this.dashT <= 0 && opp) this.castSkill(i, opp);
       }
     } else if (grounded) {
       this.vx *= 0.88; this.vz *= 0.88;
@@ -1111,27 +1164,33 @@ class Fighter {
     // 近战判定
     if (this.attackT > 0) {
       this.attackT--;
-      if (this.type === 'sword') this.meleeCheck(opp);
+      if (this.type === 'sword' && opp) this.meleeCheck(opp);
     }
 
-    // 烈焰旋风：环绕多段打击
+    // 烈焰旋风：环绕多段打击（命中范围内所有敌人）
     if (this.whirlT > 0 && gameState === 'fight') {
       if (this.whirlTick > 0) this.whirlTick--;
       else {
         this.whirlTick = 11;
         const rr = 200 * this.mods.range;
-        if (distXZ(this, opp) < rr && opp.invuln <= 0 && Math.abs(this.y - opp.y) < 140) {
-          hitTarget(opp, this, Math.round(this.dmg * 1.1 * this.mods.power * this.mods.skillPower[1] * this.dmgMul), 12, 'whirl');
-          spawnHit(opp.x, opp.y + 80, opp.z, 'whirl');
+        for (const e of enemiesOf(this)) {
+          if (e.dead || e.invuln > 0) continue;
+          if (distXZ(this, e) < rr && Math.abs(this.y - e.y) < 140) {
+            hitTarget(e, this, Math.round(this.dmg * 1.1 * this.mods.power * this.mods.skillPower[1] * this.dmgMul), 12, 'whirl');
+            spawnHit(e.x, e.y + 80, e.z, 'whirl');
+          }
         }
       }
     }
 
-    // 冲刺伤害判定
+    // 冲刺伤害判定（沿途命中所有敌人）
     if (this.dashT > 0 && gameState === 'fight') {
-      if (!this.hitSet.has(opp) && distXZ(this, opp) < 78 && Math.abs(this.y - opp.y) < 130) {
-        this.hitSet.add(opp);
-        hitTarget(opp, this, Math.round(22 * this.mods.power * this.mods.skillPower[0] * this.dmgMul), 24, 'dash');
+      for (const e of enemiesOf(this)) {
+        if (e.dead || this.hitSet.has(e)) continue;
+        if (distXZ(this, e) < 78 && Math.abs(this.y - e.y) < 130) {
+          this.hitSet.add(e);
+          hitTarget(e, this, Math.round(22 * this.mods.power * this.mods.skillPower[0] * this.dmgMul), 24, 'dash');
+        }
       }
     }
 
@@ -1157,9 +1216,10 @@ class Fighter {
   }
 
   getInput(opp) {
-    if (this.netRemote) return netRemoteIntent();      // 联机：远端玩家的输入由网络提供
-    if (this.ai) return this.ai.think(this, opp, projectiles);
+    if (this.netRemote) return netRemoteIntent(this);  // 联机：远端玩家的输入由网络提供
+    if (this.ai) return this.ai.think(this, projectiles);
     const c = this.controls;
+    if (!c) return { up: false, down: false, left: false, right: false, attack: false, skills: this.skills.map(() => false) };
     return {
       up: !!keys[c.up], down: !!keys[c.down],
       left: !!keys[c.left], right: !!keys[c.right],
@@ -1223,8 +1283,9 @@ class Fighter {
       netSfx('nova'); netShake(9);
       const rr = 230 * this.mods.range;
       netRing(this.x, this.z, 20, rr, '#a8f0ff', 26);
-      if (distXZ(this, opp) < rr && opp.invuln <= 0) {
-        hitTarget(opp, this, Math.round(16 * this.mods.power * this.mods.skillPower[1] * this.dmgMul), 22, 'nova', -14);
+      for (const e of enemiesOf(this)) {
+        if (e.dead || e.invuln > 0) continue;
+        if (distXZ(this, e) < rr) hitTarget(e, this, Math.round(16 * this.mods.power * this.mods.skillPower[1] * this.dmgMul), 22, 'nova', -14);
       }
     }
     this.cds[i] = Math.max(30, Math.round(sk.cd * this.mods.cd * this.mods.skillCd[i]));
@@ -1246,6 +1307,35 @@ class Fighter {
         hitTarget(opp, this, Math.round(this.dmg * this.mods.atk * this.dmgMul), 16, 'melee');
       }
     }
+  }
+
+  // 阵亡：隐藏模型、进入复活倒计时
+  die(attacker) {
+    if (this.dead) return;
+    this.dead = true;
+    this.respawnT = RESPAWN_TIME;
+    this.model.visible = false;
+    this.aimMesh.visible = false;
+    this.attackT = 0; this.whirlT = 0; this.novaT = 0; this.dashT = 0; this.hitStun = 0;
+    this.vx = 0; this.vz = 0; this.vy = 0; this.y = 0;
+    if (attacker && attacker.side !== undefined && attacker.side !== this.side) {
+      attacker.kills++;
+      kills[attacker.side]++;
+    }
+  }
+  // 复活：回到出生点、回满生命、短暂无敌
+  respawn() {
+    this.dead = false; this.respawnT = 0;
+    this.x = this.startX; this.z = this.startZ; this.y = 0;
+    this.vx = 0; this.vz = 0; this.vy = 0;
+    this.angle = this.startAngle; this.targetAngle = this.startAngle;
+    this.hp = this.maxHp; this.hpDisplay = this.maxHp;
+    this.invuln = 60;
+    this.ghosts = [];
+    this.model.visible = true;
+    this.model.position.set(this.x, 0, this.z);
+    this.model.rotation.set(0, this.angle, 0);
+    netRing(this.x, this.z, 6, 120, this.color, 22);
   }
 
   // 每帧姿态更新（3D 表现）
@@ -1281,7 +1371,7 @@ class Fighter {
 
     // 残影
     this.drawGhosts();
-    this.updateAim(oppOf(this));
+    this.updateAim(this.opp);
   }
 
   drawGhosts() {
@@ -1296,7 +1386,7 @@ class Fighter {
 
   updateAim(opp) {
     const m = this.aimMesh, sk = this.skills[0];
-    const ready = this.cds[0] <= 0 && gameState === 'fight' && opp;
+    const ready = this.cds[0] <= 0 && gameState === 'fight' && opp && !this.dead;
     m.visible = !!ready;
     if (!m.visible) return;
     const len = this.type === 'sword' ? 340 : 620;
@@ -1308,11 +1398,9 @@ class Fighter {
   }
 }
 
-function oppOf(f) { return f === p1 ? p2 : p1; }
-
 // ================= 命中处理 =================
 function hitTarget(target, attacker, dmg, stun, kind, knockUp) {
-  if (target.invuln > 0 || gameState !== 'fight') return;
+  if (target.dead || target.invuln > 0 || gameState !== 'fight') return;
   if (attacker && attacker.combo > 0) {
     const s = COMBO_SCALE[Math.min(attacker.combo, COMBO_SCALE.length - 1)];
     dmg = Math.max(1, Math.round(dmg * s));
@@ -1341,25 +1429,30 @@ function hitTarget(target, attacker, dmg, stun, kind, knockUp) {
     color: kind === 'fire' ? '#ffb03a' : heavyHit ? '#ffd166' : '#ffffff', big: heavyHit
   });
   netSfx(heavyHit ? 'boom' : 'hit');
-  if (target.hp <= 0) knockOut(target, attacker);
+  if (target.hp <= 0) { target.hp = 0; fighterDown(target, attacker); }
 }
 
-function knockOut(target, attacker) {
+// 角色阵亡：在该处直接停止模拟，进入复活倒计时（不再立即结束回合）
+function fighterDown(target, attacker) {
+  target.die(attacker);
+  netShake(15); netSfx('ko');
+  netHit(target.x, target.y + 60, target.z, 'nova');
+  if (!teamAlive(TEAM_RED) || !teamAlive(TEAM_BLUE)) endRound(teamAlive(TEAM_RED) ? TEAM_RED : TEAM_BLUE);
+}
+
+// 回合结算：优先采用团灭方，否则按击杀积分判定
+function endRound(forced) {
   if (gameState !== 'fight') return;
   gameState = 'roundover'; stateT = 0;
-  roundResult = attacker.side === 0 ? 0 : 1;
-  wins[attacker.side]++;
-  netShake(16); netSfx('ko');
-  const dx = target.x - attacker.x, dz = target.z - attacker.z, L = Math.hypot(dx, dz) || 1;
-  target.vx = dx / L * 14; target.vz = dz / L * 14;
-  target.vy = -13; target.y = Math.max(target.y, 1);
-  target.hitStun = 120;
-}
-function timeOut() {
-  gameState = 'roundover'; stateT = 0;
-  if (p1.hp === p2.hp) roundResult = -1;
-  else { roundResult = p1.hp > p2.hp ? 0 : 1; wins[roundResult]++; }
+  if (forced === TEAM_RED || forced === TEAM_BLUE) { roundResult = forced; wins[forced]++; }
+  else if (kills[0] === kills[1]) roundResult = -1;
+  else { roundResult = kills[0] > kills[1] ? 0 : 1; wins[roundResult]++; }
   netSfx('ko');
+}
+
+// 时间耗尽：按击杀积分判定胜负
+function timeOut() {
+  endRound(-1);
 }
 
 // ================= 特效容器 =================
@@ -1387,25 +1480,32 @@ const NET_ICE = { iceServers: [
   { urls: 'stun:stun1.l.google.com:19302' }
 ] };
 
+// 星型拓扑：主机 + 最多 3 个客户端（合计 4 名真人），其余位置 AI 补位。
+// 主机操控红方 0 号，客户端依次操控蓝方 0 / 1 / 2 号，全部接收同一份权威快照。
+const MAX_CLIENTS = 3;
+const CLIENT_SLOTS = [5, 6, 7];   // fighters 中客户端占用的下标（蓝方 0/1/2）
+
 const net = {
-  role: null, pc: null, dc: null,
-  active: false, connected: false,
-  remoteSeq: -1,
-  held: { up: false, down: false, left: false, right: false },
-  edges: null,
-  latestSnap: null,
-  inputSeq: 0,
-  events: [],
-  projMap: new Map(),
+  role: null, active: false, connected: false,
+  peers: [],                    // 主机：每个客户端一条链路；客户端：长度为 1
+  latestSnap: null, inputSeq: 0,
+  events: [], projMap: new Map(),
   txFrame: 0,
-  rtt: 0,
-  pingSent: 0,
-  guestPick: -1,
-  sentObstacleVer: -1,
-  send(o) {
-    if (this.dc && this.dc.readyState === 'open') { try { this.dc.send(JSON.stringify(o)); } catch (e) { } }
-  }
+  guestPick: -1, sentObstacleVer: -1,
+  mySlot: -1,
+  pendingPeer: null,
+  sendTo(peer, o) {
+    if (peer && peer.dc && peer.dc.readyState === 'open') { try { peer.dc.send(JSON.stringify(o)); } catch (e) { } }
+  },
+  broadcast(o) { for (const p of this.peers) this.sendTo(p, o); }
 };
+function newPeer(slot) {
+  return {
+    pc: null, dc: null, slot: slot, fighter: slot >= 0 ? fighters[slot] : null,
+    held: { up: false, down: false, left: false, right: false },
+    edges: null, remoteSeq: -1, rtt: 0, pingSent: 0, ready: false
+  };
+}
 
 // ---- 特效 / 音效事件：主机产生，客户端回放 ----
 function netEmit(e) { if (net.active && net.role === 'host') net.events.push(e); }
@@ -1422,12 +1522,15 @@ function applyNetEvent(e) {
   else if (e.k === 'sfx') { if (SFX[e.n]) SFX[e.n](); }
 }
 
-// ---- 远端输入（主机侧对 p2 取用；边沿信号每次结算后清空） ----
-function netRemoteIntent() {
-  if (!net.edges) net.edges = { attack: false, skills: p2.skills.map(() => false) };
-  const e = net.edges;
+// ---- 远端输入（主机侧按角色所属客户端取用；边沿信号每次结算后清空） ----
+function newPeerEdges(f) { return { attack: false, skills: f.skills.map(() => false) }; }
+function netRemoteIntent(f) {
+  const peer = f.netPeer;
+  const idle = { up: false, down: false, left: false, right: false, attack: false, skills: f.skills.map(() => false) };
+  if (!peer || !peer.edges) return idle;
+  const e = peer.edges;
   const out = {
-    up: net.held.up, down: net.held.down, left: net.held.left, right: net.held.right,
+    up: peer.held.up, down: peer.held.down, left: peer.held.left, right: peer.held.right,
     attack: e.attack, skills: e.skills.slice()
   };
   e.attack = false;
@@ -1443,7 +1546,8 @@ function fighterState(f) {
     r2(f.angle), r2(f.targetAngle), f.hp, f.maxHp, f.animT, f.attackT, f.attackDur,
     f.cds[0] || 0, f.cds[1] || 0,
     f.hitStun, f.invuln, f.dashT, f.whirlT, f.novaT,
-    f.chainStep, f.chainT, f.combo, f.comboT, f.flash, r2(f.walkPhase)
+    f.chainStep, f.chainT, f.combo, f.comboT, f.flash, r2(f.walkPhase),
+    f.dead ? 1 : 0, f.respawnT
   ];
 }
 function applyFighterState(f, a) {
@@ -1454,6 +1558,8 @@ function applyFighterState(f, a) {
   f.hitStun = a[15]; f.invuln = a[16]; f.dashT = a[17]; f.whirlT = a[18]; f.novaT = a[19];
   f.chainStep = a[20]; f.chainT = a[21]; f.combo = a[22]; f.comboT = a[23]; f.flash = a[24];
   f.walkPhase = a[25];
+  f.dead = !!a[26]; f.respawnT = a[27] || 0;
+  f.model.visible = !f.dead;
   f.model.position.set(f.x, f.y, f.z);
   f.model.rotation.set(0, f.angle, 0);
 }
@@ -1493,17 +1599,17 @@ function applySnapshot(s) {
   const prevGs = gameState;
   gameState = s.gs; stateT = s.st; round = s.rd;
   wins[0] = s.wi[0]; wins[1] = s.wi[1];
+  if (s.kl) { kills[0] = s.kl[0]; kills[1] = s.kl[1]; }
   roundTime = s.rt;
   roundResult = (s.pr === undefined ? null : s.pr);
   paused = !!s.pa;
-  applyFighterState(p1, s.f[0]);
-  applyFighterState(p2, s.f[1]);
+  for (let i = 0; i < fighters.length; i++) applyFighterState(fighters[i], s.f[i]);
   netSyncProjectiles(s.pj || []);
   if (s.obs) applyObstacleLayout(s.obs.map(a => ({ x: a[0], z: a[1], hx: a[2], hz: a[3], h: a[4] })));
   if (s.uc) {
-    p1.upgradeCounts = s.uc[0]; p2.upgradeCounts = s.uc[1];
-    p1.upgrades = new Array(upgradesTotal(p1.upgradeCounts));
-    p2.upgrades = new Array(upgradesTotal(p2.upgradeCounts));
+    teamState[0].upgradeCounts = s.uc[0]; teamState[1].upgradeCounts = s.uc[1];
+    teamState[0].upgrades = new Array(upgradesTotal(teamState[0].upgradeCounts));
+    teamState[1].upgrades = new Array(upgradesTotal(teamState[1].upgradeCounts));
   }
   if (s.up) {
     upgradePhase = s.up.ph;
@@ -1518,13 +1624,16 @@ function applySnapshot(s) {
 
 // ---- 主机：每帧广播快照 ----
 function netHostSend() {
-  if (!net.connected || !net.dc || net.dc.readyState !== 'open') return;
+  if (net.role !== 'host' || !net.peers.length) return;
   net.txFrame++;
-  if (net.txFrame % 30 === 0) { net.pingSent = performance.now(); net.send({ t: 'ping', ts: net.pingSent }); }
+  if (net.txFrame % 30 === 0) {
+    const ts = performance.now();
+    for (const p of net.peers) { p.pingSent = ts; net.sendTo(p, { t: 'ping', ts: ts }); }
+  }
   const snap = {
-    gs: gameState, st: stateT, rd: round, wi: [wins[0], wins[1]], rt: roundTime,
+    gs: gameState, st: stateT, rd: round, wi: [wins[0], wins[1]], kl: [kills[0], kills[1]], rt: roundTime,
     pr: (roundResult === null ? null : roundResult), pa: paused,
-    f: [fighterState(p1), fighterState(p2)],
+    f: fighters.map(fighterState),
     pj: projectiles.map(p => [p.__id, Math.round(p.x), Math.round(p.y), Math.round(p.z), p.type, p.color, p.r]),
     ev: net.events
   };
@@ -1535,43 +1644,44 @@ function netHostSend() {
   }
   if (gameState === 'upgrade') {
     snap.up = { ph: upgradePhase, sel: upgradeSel, c: [upgradeChoices[0].map(u => u.id), upgradeChoices[1].map(u => u.id)] };
-    snap.uc = [p1.upgradeCounts, p2.upgradeCounts];
+    snap.uc = [teamState[0].upgradeCounts, teamState[1].upgradeCounts];
   }
   net.events = [];
-  net.send({ t: 's', d: snap });
+  net.broadcast({ t: 's', d: snap });
 }
 
 // ---- 客户端：上传输入 + 应用快照 ----
 function netGuestStep() {
   time++;
   if (shakeT > 0) shakeT--;
-  const open = net.connected && net.dc && net.dc.readyState === 'open';
-  if (open) {
+  const peer = net.peers[0];
+  const me = net.mySlot >= 0 ? fighters[net.mySlot] : null;
+  const open = net.connected && peer && peer.dc && peer.dc.readyState === 'open';
+  if (open && me) {
     if (gameState === 'upgrade') {
       if (upgradePhase === 1) {
         const cards = upgradeChoices[1];
         if (cards && cards.length) {
           if (consume('ArrowLeft')) { upgradeSel = (upgradeSel + cards.length - 1) % cards.length; SFX.nav(); }
           if (consume('ArrowRight')) { upgradeSel = (upgradeSel + 1) % cards.length; SFX.nav(); }
-          if (consume('KeyK') || consume('Space')) { net.send({ t: 'pick', p: upgradeSel }); SFX.ready(); }
+          if (consume('KeyK') || consume('Space') || consume('Enter')) { net.sendTo(peer, { t: 'pick', p: upgradeSel }); SFX.ready(); }
         }
       }
     } else if (gameState === 'countdown' || gameState === 'fight' || gameState === 'roundover') {
-      const c = p2.controls;
+      const c = me.controls;
       net.inputSeq++;
-      net.send({
-        t: 'i', seq: net.inputSeq, d: {
-          up: !!keys[c.up], down: !!keys[c.down], left: !!keys[c.left], right: !!keys[c.right],
-          attack: consume(c.attack), skills: p2.skills.map(s => consume(s.key))
+      net.sendTo(peer, {
+        t: 'i', slot: net.mySlot, seq: net.inputSeq, d: {
+          up: !!(c && keys[c.up]), down: !!(c && keys[c.down]), left: !!(c && keys[c.left]), right: !!(c && keys[c.right]),
+          attack: c ? consume(c.attack) : false, skills: me.skills.map(s => consume(s.key))
         }
       });
     }
     if (consume('KeyM')) { muted = !muted; Music.apply(0.15); }
-    if (time % 30 === 0) { net.pingSent = performance.now(); net.send({ t: 'ping', ts: net.pingSent }); }
   }
   if (net.latestSnap) { applySnapshot(net.latestSnap); net.latestSnap = null; }
   updateFloaters(); updateSparks(); updateRings();
-  p1.pose(); p2.pose();
+  for (const f of fighters) f.pose();
   clearPressed();
 }
 
@@ -1593,99 +1703,165 @@ function netWaitICE(pc) {
 function netEnc(o) { return btoa(unescape(encodeURIComponent(JSON.stringify(o)))); }
 function netDec(s) { return JSON.parse(decodeURIComponent(escape(atob(String(s).replace(/\s+/g, ''))))); }
 
-function netBindDC(dc) {
-  net.dc = dc;
-  dc.onopen = () => { net.connected = true; netOnConnected(); };
-  dc.onclose = () => { net.connected = false; if (net.active) netEnd('与对手的连接已断开'); };
-  dc.onmessage = ev => { let m; try { m = JSON.parse(ev.data); } catch (e) { return; } netOnMessage(m); };
+function netBindDC(peer, dc) {
+  peer.dc = dc;
+  dc.onopen = () => { peer.ready = true; netOnPeerConnected(peer); };
+  dc.onclose = () => { netDropPeer(peer, net.role === 'guest' ? '与主机的连接已断开' : '有一名玩家已断开，其角色已由 AI 接管'); };
+  dc.onmessage = ev => { let m; try { m = JSON.parse(ev.data); } catch (e) { return; } netOnMessage(m, peer); };
 }
-function netOnMessage(m) {
-  if (m.t === 'i') {
-    if (!net.edges) net.edges = { attack: false, skills: p2.skills.map(() => false) };
-    if (m.seq <= net.remoteSeq) return;
-    net.remoteSeq = m.seq;
+
+function netOnMessage(m, peer) {
+  if (m.t === 'i') {                       // 主机：收到某客户端输入
+    if (!peer.edges || peer.slot !== m.slot) {
+      peer.slot = m.slot;
+      peer.fighter = fighters[m.slot];
+      peer.edges = newPeerEdges(peer.fighter);
+      peer.remoteSeq = -1;
+    }
+    if (m.seq <= peer.remoteSeq) return;
+    peer.remoteSeq = m.seq;
     const d = m.d;
-    net.held.up = !!d.up; net.held.down = !!d.down; net.held.left = !!d.left; net.held.right = !!d.right;
-    if (d.attack) net.edges.attack = true;
-    for (let i = 0; i < net.edges.skills.length; i++) if (d.skills[i]) net.edges.skills[i] = true;
-  } else if (m.t === 's') {
+    peer.held.up = !!d.up; peer.held.down = !!d.down; peer.held.left = !!d.left; peer.held.right = !!d.right;
+    if (d.attack) peer.edges.attack = true;
+    for (let i = 0; i < peer.edges.skills.length; i++) if (d.skills[i]) peer.edges.skills[i] = true;
+  } else if (m.t === 's') {                 // 客户端：应用权威快照
     net.latestSnap = m.d;
     if (gameState === 'netlobby') netHide();
+  } else if (m.t === 'hello') {             // 客户端：得知自己操控的角色
+    net.mySlot = m.slot;
+    const f = fighters[m.slot];
+    f.ai = null; f.netRemote = false; f.netPeer = null; f.controls = SCHEME_A;
+    teamState[1].hasHuman = true; teamState[1].remote = true;
+    humans.length = 0; humans.push(f);
+    netShowWaiting('已连接（操控：' + f.name + '），等待主机开始…');
   } else if (m.t === 'pick') {
     net.guestPick = m.p;
   } else if (m.t === 'ping') {
-    net.send({ t: 'pong', ts: m.ts });
+    net.sendTo(peer, { t: 'pong', ts: m.ts });
   } else if (m.t === 'pong') {
-    net.rtt = performance.now() - m.ts;
+    peer.rtt = performance.now() - m.ts;
   } else if (m.t === 'bye') {
-    if (net.active) netEnd('对手已离开房间');
+    if (peer.ready) netDropPeer(peer, net.role === 'guest' ? '主机已关闭房间' : '有一名玩家已离开');
   }
 }
-function netOnConnected() {
-  net.active = true;
-  net.events = []; net.guestPick = -1; net.inputSeq = 0; net.remoteSeq = -1;
-  net.sentObstacleVer = -1;
-  net.held = { up: false, down: false, left: false, right: false };
-  net.edges = { attack: false, skills: p2.skills.map(() => false) };
-  p2.ai = null;
-  p2.netRemote = (net.role === 'host');
-  for (const pr of net.projMap.values()) pr.dispose();
-  net.projMap = new Map();
-  if (net.role === 'host') { netHide(); startNetMatch(); }
-  else netShowWaiting('已连接，等待主机开始…');
+
+// 主机：新客户端接入
+function netOnPeerConnected(peer) {
+  peer.edges = peer.edges || newPeerEdges(peer.fighter);
+  if (net.role === 'host') {
+    if (net.peers.indexOf(peer) < 0) net.peers.push(peer);
+    net.active = true; net.connected = true;
+    const f = peer.fighter;
+    f.ai = null; f.netRemote = true; f.netPeer = peer; f.controls = SCHEME_A; f.dmgMul = 1;
+    teamState[1].hasHuman = true; teamState[1].remote = true;
+    net.sendTo(peer, { t: 'hello', slot: peer.slot });
+    net.pendingPeer = null;
+    netShowHostRoom();
+  } else {
+    net.connected = true; net.active = true;
+  }
 }
+
+// 断线处理：主机移除该客户端并把其角色交还 AI
+function netDropPeer(peer, msg) {
+  if (peer.dc) { try { peer.dc.close(); } catch (e) { } }
+  if (peer.pc) { try { peer.pc.close(); } catch (e) { } }
+  if (net.role === 'guest') { netEnd(msg); return; }
+  const f = peer.fighter;
+  if (f) { f.netRemote = false; f.netPeer = null; f.ai = new EnemyAI('normal'); }
+  net.peers = net.peers.filter(p => p !== peer);
+  if (net.pendingPeer === peer) net.pendingPeer = null;
+  const still = net.peers.length > 0;
+  teamState[1].hasHuman = still; teamState[1].remote = still;
+  if (gameState === 'netlobby') netShowHostRoom();
+  else netMsg(msg);
+}
+
+// 主机：开始对战（分配真人 / AI 角色）
 function startNetMatch() {
   net.active = true;
   aiLevel = null;
-  p2.ai = null; p2.netRemote = true; p2.dmgMul = 1;
-  p1.resetMods(); p2.resetMods();
-  wins = [0, 0]; round = 1;
-  net.events = []; net.guestPick = -1;
+  for (const f of fighters) { f.ai = null; f.netRemote = false; f.netPeer = null; f.controls = null; f.dmgMul = 1; }
+  humans.length = 0;
+  teamState[0].hasHuman = false; teamState[0].remote = false;
+  teamState[1].hasHuman = false; teamState[1].remote = false;
+  const host = redTeam[0]; host.ai = null; host.controls = SCHEME_A; humans.push(host); teamState[0].hasHuman = true;
+  for (const peer of net.peers) {
+    const f = fighters[peer.slot];
+    f.ai = null; f.netRemote = true; f.netPeer = peer; f.controls = SCHEME_A; f.dmgMul = 1;
+    teamState[1].hasHuman = true; teamState[1].remote = true;
+    net.sendTo(peer, { t: 'hello', slot: peer.slot });
+  }
+  for (const f of fighters) if (!f.netRemote && humans.indexOf(f) < 0) f.ai = new EnemyAI('normal');
+  for (const f of fighters) f.resetMods();
+  teamState[0].upgradeCounts = {}; teamState[1].upgradeCounts = {};
+  teamState[0].upgrades = []; teamState[1].upgrades = [];
+  wins = [0, 0]; kills = [0, 0]; round = 1;
+  net.events = []; net.guestPick = -1; net.inputSeq = 0; net.sentObstacleVer = -1;
+  for (const pr of net.projMap.values()) pr.dispose();
+  net.projMap = new Map();
   regenerateObstacles();               // 主机生成，随后随快照同步给客户端
+  netHide();
   Music.duck = 1; Music.play('battle'); Music.apply(0.3);
   startRound();
 }
 
 async function netStartHost() {
   net.role = 'host';
-  netShowWaiting('正在生成连接码…');
-  net.pc = netNewPC();
-  netBindDC(net.pc.createDataChannel('game', { ordered: true }));
-  const offer = await net.pc.createOffer();
-  await net.pc.setLocalDescription(offer);
-  await netWaitICE(net.pc);
-  netShowHostOffer(netEnc(net.pc.localDescription));
+  net.peers = []; net.pendingPeer = null; net.active = false; net.connected = false;
+  for (const f of fighters) { f.ai = new EnemyAI('normal'); f.netRemote = false; f.netPeer = null; f.controls = null; f.dmgMul = 1; }
+  humans.length = 0;
+  teamState[0].hasHuman = true; teamState[0].remote = false;
+  teamState[1].hasHuman = false; teamState[1].remote = false;
+  const host = redTeam[0]; host.ai = null; host.controls = SCHEME_A; humans.push(host);
+  netShowHostRoom();
+}
+async function netAddHostPeer() {
+  if (net.peers.length >= MAX_CLIENTS) return netMsg('已达到最大真人数量（4 人）');
+  const slot = CLIENT_SLOTS[net.peers.length];
+  const peer = newPeer(slot);
+  peer.edges = newPeerEdges(peer.fighter);
+  peer.pc = netNewPC();
+  netBindDC(peer, peer.pc.createDataChannel('game', { ordered: true }));
+  const offer = await peer.pc.createOffer();
+  await peer.pc.setLocalDescription(offer);
+  await netWaitICE(peer.pc);
+  net.pendingPeer = peer;
+  netShowHostRoom(netEnc(peer.pc.localDescription), net.peers.length + 1);
 }
 async function netHostAccept(code) {
-  await net.pc.setRemoteDescription(netDec(code));
-  netShowWaiting('正在与对手建立连接…');
+  const peer = net.pendingPeer;
+  if (!peer) return;
+  await peer.pc.setRemoteDescription(netDec(code));
+  netShowWaiting('正在与玩家 ' + (net.peers.length + 1) + ' 建立连接…');
 }
 async function netJoin(code) {
   net.role = 'guest';
-  net.pc = netNewPC();
-  net.pc.ondatachannel = e => netBindDC(e.channel);
-  await net.pc.setRemoteDescription(netDec(code));
-  const ans = await net.pc.createAnswer();
-  await net.pc.setLocalDescription(ans);
+  net.peers = []; net.mySlot = -1;
+  const peer = newPeer(-1);
+  peer.pc = netNewPC();
+  peer.pc.ondatachannel = e => netBindDC(peer, e.channel);
+  net.peers.push(peer);
+  await peer.pc.setRemoteDescription(netDec(code));
+  const ans = await peer.pc.createAnswer();
+  await peer.pc.setLocalDescription(ans);
   netShowWaiting('正在生成应答码…');
-  await netWaitICE(net.pc);
-  netShowGuestAnswer(netEnc(net.pc.localDescription));
+  await netWaitICE(peer.pc);
+  netShowGuestAnswer(netEnc(peer.pc.localDescription));
 }
 
 function netTeardown() {
-  net.send({ t: 'bye' });
-  if (net.dc) { try { net.dc.close(); } catch (e) { } }
-  if (net.pc) { try { net.pc.close(); } catch (e) { } }
+  for (const p of net.peers) { net.sendTo(p, { t: 'bye' }); if (p.dc) { try { p.dc.close(); } catch (e) { } } if (p.pc) { try { p.pc.close(); } catch (e) { } } }
+  if (net.pendingPeer && net.pendingPeer.pc) { try { net.pendingPeer.pc.close(); } catch (e) { } }
   for (const pr of net.projMap.values()) {
     pr.dispose();
     const i = projectiles.indexOf(pr);
     if (i >= 0) projectiles.splice(i, 1);
   }
   net.projMap = new Map();
-  net.dc = null; net.pc = null;
+  net.peers = []; net.pendingPeer = null;
   net.active = false; net.connected = false; net.role = null;
-  net.latestSnap = null;
-  p2.netRemote = false;
+  net.latestSnap = null; net.mySlot = -1;
   netHide();
 }
 function netEnd(msg) {
@@ -1716,9 +1892,10 @@ function netCopy(id, ok) {
 }
 function netShowChoose() {
   netUI(`<h2>联机对战 · P2P</h2>
-    <p>无需服务器：一方创建房间，另一方加入。<br>
-       双方各复制 / 粘贴 <b>一次连接码</b> 建立直连，之后为点对点联机。</p>
-    <p>主机操控「烈焰剑客」，客户端操控「秘法星灵」。</p>
+    <p>无需服务器：一方创建房间，其余玩家依次加入。<br>
+       每名玩家复制 / 粘贴 <b>一次连接码</b> 建立直连，之后为点对点联机。</p>
+    <p>最多 <b>4 名真人</b>（主机 + 3 名客户端）：主机操控红方 0 号，<br>
+       客户端依次操控蓝方 0 / 1 / 2 号，其余位置由 AI 补位。</p>
     <div class="row">
       <button class="pri" id="nbHost">创建房间（我是主机）</button>
       <button id="nbJoin">加入房间（我是客户端）</button>
@@ -1730,24 +1907,40 @@ function netShowChoose() {
     netui.querySelector('#nbBack').onclick = () => { net.role = null; gameState = 'menu'; stateT = 0; netHide(); };
   });
 }
-function netShowHostOffer(code) {
-  netUI(`<h2>房间已创建</h2>
-    <p>1. 复制下面的 <b>连接码</b>，发给对手。<br>
-       2. 对手会回传一段 <b>应答码</b>，把它粘贴到第二个框里，点「连接」。</p>
-    <textarea id="nbOffer" readonly>${code}</textarea>
-    <div class="row"><button class="pri" id="nbCopy">复制连接码</button><button id="nbCancel">取消</button></div>
-    <p>粘贴对手的应答码：</p>
-    <textarea id="nbAnswer" placeholder="在此粘贴应答码…"></textarea>
-    <div class="row"><button class="pri" id="nbAccept">连接</button></div>
-    <p id="netMsg"></p>`, () => {
-    netui.querySelector('#nbCopy').onclick = () => netCopy('#nbOffer', '已复制连接码，请发给对手');
-    netui.querySelector('#nbCancel').onclick = () => { netTeardown(); netShowChoose(); };
-    netui.querySelector('#nbAccept').onclick = () => {
-      const v = netui.querySelector('#nbAnswer').value.trim();
+// 主机房间面板：可逐个接入最多 3 名客户端，再统一开始 5v5 对战
+function netShowHostRoom(code, num) {
+  const connected = net.peers.length;
+  let html = '<h2>联机房间 · 主机</h2>';
+  html += '<p>已连接客户端：<b>' + connected + ' / ' + MAX_CLIENTS + '</b>　主机操控红方 0 号，客户端操控蓝方 0 / 1 / 2 号。</p>';
+  if (code) {
+    html += '<p>1. 复制下面的 <b>连接码</b>，发给第 ' + num + ' 位玩家。<br>2. 对方回传 <b>应答码</b> 后，粘贴到下方并点「连接」。</p>';
+    html += '<textarea id="nbOffer" readonly>' + code + '</textarea>';
+    html += '<div class="row"><button class="pri" id="nbCopy">复制连接码</button></div>';
+    html += '<p>粘贴对方的应答码：</p>';
+    html += '<textarea id="nbAnswer" placeholder="在此粘贴应答码…"></textarea>';
+    html += '<div class="row"><button class="pri" id="nbAccept">连接</button><button id="nbCancelPeer">取消本次</button></div>';
+  } else {
+    html += '<div class="row"><button class="pri" id="nbAdd">' + (connected ? '再添加一名玩家' : '生成连接码') + '</button></div>';
+  }
+  html += '<div class="row"><button class="pri" id="nbStart">开始 5v5 对战</button><button id="nbQuit">解散房间</button></div>';
+  html += '<p id="netMsg"></p>';
+  netUI(html, () => {
+    const q = id => netui.querySelector(id);
+    if (q('#nbCopy')) q('#nbCopy').onclick = () => netCopy('#nbOffer', '已复制连接码，请发给对方');
+    if (q('#nbAccept')) q('#nbAccept').onclick = () => {
+      const v = q('#nbAnswer').value.trim();
       if (!v) return netMsg('请先粘贴应答码');
       netMsg('正在连接…');
       netHostAccept(v).catch(e => netMsg('连接失败：' + e.message));
     };
+    if (q('#nbCancelPeer')) q('#nbCancelPeer').onclick = () => {
+      if (net.pendingPeer && net.pendingPeer.pc) { try { net.pendingPeer.pc.close(); } catch (e) { } }
+      net.pendingPeer = null;
+      netShowHostRoom();
+    };
+    if (q('#nbAdd')) q('#nbAdd').onclick = () => netAddHostPeer().catch(e => netMsg('生成失败：' + e.message));
+    if (q('#nbStart')) q('#nbStart').onclick = () => { startNetMatch(); };
+    if (q('#nbQuit')) q('#nbQuit').onclick = () => { netTeardown(); netShowChoose(); };
   });
 }
 function netShowGuestInput() {
@@ -1789,34 +1982,76 @@ let upgradePhase = 0, upgradeSel = 0, upgradeChoices = [[], []];
 const TOTAL_ROUND_TIME = 75 * 60;
 
 const MENU = [
-  { id: 'pvp',    label: '双人对战',   desc: '两名玩家同屏操作' },
-  { id: 'p2p',    label: '联机对战',   desc: 'P2P 直连 · 跨设备对战' },
-  { id: 'easy',   label: '人机 · 简单', desc: '反应慢、会失误' },
-  { id: 'normal', label: '人机 · 普通', desc: '会走位与闪避' },
-  { id: 'hard',   label: '人机 · 困难', desc: '反应快、抓破绽' }
+  { id: 'pvp',    label: '双人对战',   desc: '5v5 · 两名玩家同屏，各带 5 人' },
+  { id: 'p2p',    label: '联机对战',   desc: '5v5 · P2P 直连（最多 4 名真人）' },
+  { id: 'easy',   label: '人机 · 简单', desc: '5v5 · 电脑反应慢、会失误' },
+  { id: 'normal', label: '人机 · 普通', desc: '5v5 · 电脑会走位与闪避' },
+  { id: 'hard',   label: '人机 · 困难', desc: '5v5 · 电脑反应快、抓破绽' }
 ];
 let menuIndex = 0;
 let currentMode = 0;
 let aiLevel = null;
 
-const p1 = new Fighter({
-  name: '烈焰剑客', color: '#ff5a5f', color2: '#a81f38', type: 'sword',
-  maxHp: 220, speed: 5.9, side: 0, startX: -SPAWN_X, startZ: 0, startAngle: Math.PI / 2,
-  controls: { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', attack: 'KeyF' }
-});
-const p2 = new Fighter({
-  name: '秘法星灵', color: '#4fa8ff', color2: '#1b4f9e', type: 'mage',
-  maxHp: 200, speed: 4.7, side: 1, startX: SPAWN_X, startZ: 0, startAngle: -Math.PI / 2,
-  controls: { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', attack: 'KeyK' }
-});
+// ---- 同屏真人控制方案 ----
+const SCHEME_A = { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', attack: 'KeyF' };                       // 红方主控
+const SCHEME_B = { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', attack: 'KeyK' };   // 蓝方副控
+
+// ---- 队伍状态（技能强化按队共享） ----
+const teamState = [
+  { hasHuman: false, remote: false, upgradeCounts: {}, upgrades: [] },
+  { hasHuman: false, remote: false, upgradeCounts: {}, upgrades: [] }
+];
+const humans = [];                 // 本机操控的角色
+let kills = [0, 0];                // 每队本回合击杀数
+
+// ---- 英雄名册：红蓝各 5 名，近战/远程交替 ----
+const ROSTER = [
+  [ // 红方（TEAM_RED）
+    { name: '烈焰剑客', color: '#ff5a5f', color2: '#a81f38', type: 'sword' },
+    { name: '赤炎刀锋', color: '#ff7a3d', color2: '#a83c12', type: 'sword' },
+    { name: '绯红术士', color: '#ff6b8a', color2: '#9e2445', type: 'mage' },
+    { name: '血月刺客', color: '#e0455f', color2: '#7c1230', type: 'sword' },
+    { name: '烈焰法师', color: '#ff8f5a', color2: '#a04a1c', type: 'mage' }
+  ],
+  [ // 蓝方（TEAM_BLUE）
+    { name: '秘法星灵', color: '#4fa8ff', color2: '#1b4f9e', type: 'mage' },
+    { name: '苍穹剑士', color: '#5b8cff', color2: '#1e3a8e', type: 'sword' },
+    { name: '寒霜法师', color: '#57d4ff', color2: '#146a9e', type: 'mage' },
+    { name: '碧海刀客', color: '#4fc3c8', color2: '#146a72', type: 'sword' },
+    { name: '紫电术士', color: '#8f7bff', color2: '#3a2598', type: 'mage' }
+  ]
+];
+
+// ---- 实例化 10 名英雄并编入红蓝两队 ----
+const fighters = [];
+const redTeam = [];
+const blueTeam = [];
+for (let side = 0; side < 2; side++) {
+  const team = side === TEAM_RED ? redTeam : blueTeam;
+  for (let i = 0; i < TEAM_SIZE; i++) {
+    const h = ROSTER[side][i];
+    const f = new Fighter({
+      name: h.name, color: h.color, color2: h.color2, type: h.type,
+      maxHp: h.type === 'sword' ? 220 : 200,
+      speed: h.type === 'sword' ? 5.9 : 4.7,
+      side: side, slot: i,
+      startX: side === TEAM_RED ? -SPAWN_X : SPAWN_X,
+      startZ: SLOT_Z[i],
+      startAngle: side === TEAM_RED ? Math.PI / 2 : -Math.PI / 2,
+      controls: null
+    });
+    fighters.push(f);
+    team.push(f);
+  }
+}
 
 function startRound() {
-  p1.reset(); p2.reset();
-  if (p2.ai) p2.ai.reset();
+  for (const f of fighters) { f.reset(); if (f.ai) f.ai.reset(); }
   for (const pr of projectiles) pr.dispose();
   projectiles = []; floaters = [];
   roundTime = TOTAL_ROUND_TIME;
   roundResult = null;
+  kills = [0, 0];
   gameState = 'countdown'; stateT = 0; paused = false;
 }
 function startMatch(modeIdx) {
@@ -1824,23 +2059,43 @@ function startMatch(modeIdx) {
   currentMode = modeIdx;
   const modeId = MENU[modeIdx].id;
   aiLevel = (modeId === 'pvp' || modeId === 'p2p') ? null : modeId;
-  p2.ai = aiLevel ? new EnemyAI(aiLevel) : null;
-  p2.dmgMul = aiLevel ? DIFFS[aiLevel].dmg : 1;
-  p1.resetMods(); p2.resetMods();
-  wins = [0, 0]; round = 1;
+  net.active = false;
+
+  humans.length = 0;
+  for (const f of fighters) { f.ai = null; f.netRemote = false; f.netPeer = null; f.controls = null; f.dmgMul = 1; }
+  teamState[0].hasHuman = false; teamState[1].hasHuman = false;
+  teamState[0].remote = false; teamState[1].remote = false;
+
+  // 红方 0 号始终由本机操控
+  const h1 = redTeam[0]; h1.controls = SCHEME_A; humans.push(h1); teamState[0].hasHuman = true;
+  // 同屏双人：蓝方 0 号由本机第二位玩家操控
+  if (modeId === 'pvp') {
+    const h2 = blueTeam[0]; h2.controls = SCHEME_B; humans.push(h2); teamState[1].hasHuman = true;
+  }
+  const aiLv = aiLevel || 'normal';
+  for (const f of fighters) if (humans.indexOf(f) < 0) f.ai = new EnemyAI(aiLv);
+  for (const f of fighters) { f.dmgMul = aiLevel ? DIFFS[aiLv].dmg : 1; f.resetMods(); }
+  for (const f of humans) f.dmgMul = 1;      // 真人角色不受难度加成影响
+
+  teamState[0].upgradeCounts = {}; teamState[1].upgradeCounts = {};
+  teamState[0].upgrades = []; teamState[1].upgrades = [];
+  wins = [0, 0]; kills = [0, 0]; round = 1;
   regenerateObstacles();
   Music.duck = 1; Music.play('battle'); Music.apply(0.3);
   startRound();
 }
 function beginUpgrade() {
   gameState = 'upgrade'; stateT = 0; upgradePhase = 0; upgradeSel = 0;
-  upgradeChoices = [rollUpgrades(p1), rollUpgrades(p2)];
+  upgradeChoices = [rollTeamUpgrades(teamState[0]), rollTeamUpgrades(teamState[1])];
 }
 function commitUpgrade() {
-  const chooser = upgradePhase === 0 ? p1 : p2;
+  const ts = teamState[upgradePhase];
   const card = upgradeChoices[upgradePhase][upgradeSel];
   if (!card) return;
-  chooser.applyUpgrade(card);
+  ts.upgradeCounts[card.id] = (ts.upgradeCounts[card.id] || 0) + 1;
+  ts.upgrades.push(card.id);
+  const team = upgradePhase === 0 ? redTeam : blueTeam;
+  for (const f of team) card.apply(f);     // 全队共享强化
   SFX.ready();
   upgradePhase++; upgradeSel = 0; stateT = 0;
   if (upgradePhase >= 2) { round++; startRound(); }
@@ -1859,19 +2114,29 @@ function resolveObstacleCollision(f) {
   }
 }
 
-// 身体碰撞：水平面分离
+// 身体碰撞：N 体在水平面相互分离
 function resolveBodyCollision() {
-  if (Math.abs(p1.y - p2.y) > 130) return;
-  const dx = p2.x - p1.x, dz = p2.z - p1.z;
-  const d = Math.hypot(dx, dz);
-  const minD = p1.radius + p2.radius;
-  if (d >= minD || d < 0.001) return;
-  const push = (minD - d) / 2, ux = dx / d, uz = dz / d;
-  p1.x -= ux * push; p1.z -= uz * push;
-  p2.x += ux * push; p2.z += uz * push;
-  p1.x = clamp(p1.x, -ARENA_HX, ARENA_HX); p1.z = clamp(p1.z, -ARENA_HZ, ARENA_HZ);
-  p2.x = clamp(p2.x, -ARENA_HX, ARENA_HX); p2.z = clamp(p2.z, -ARENA_HZ, ARENA_HZ);
-  resolveObstacleCollision(p1); resolveObstacleCollision(p2);
+  for (let i = 0; i < fighters.length; i++) {
+    const a = fighters[i];
+    if (a.dead) continue;
+    for (let j = i + 1; j < fighters.length; j++) {
+      const b = fighters[j];
+      if (b.dead) continue;
+      if (Math.abs(a.y - b.y) > 130) continue;
+      const dx = b.x - a.x, dz = b.z - a.z;
+      const d = Math.hypot(dx, dz);
+      const minD = a.radius + b.radius;
+      if (d >= minD || d < 0.001) continue;
+      const push = (minD - d) / 2, ux = dx / d, uz = dz / d;
+      a.x -= ux * push; a.z -= uz * push;
+      b.x += ux * push; b.z += uz * push;
+    }
+  }
+  for (const f of fighters) {
+    if (f.dead) continue;
+    f.x = clamp(f.x, -ARENA_HX, ARENA_HX); f.z = clamp(f.z, -ARENA_HZ, ARENA_HZ);
+    resolveObstacleCollision(f);
+  }
 }
 
 function updateProjectiles() {
@@ -1890,11 +2155,16 @@ function updateProjectiles() {
       }
       if (pr.dead) continue;
     }
-    const target = pr.owner === p1 ? p2 : p1;
-    const pd = Math.hypot(pr.x - target.x, pr.z - target.z);
-    if (gameState === 'fight' && !pr.dead && pd < pr.r + target.radius && Math.abs(pr.y - (target.y + 80)) < 110 && target.invuln <= 0) {
-      pr.dead = true;
-      hitTarget(target, pr.owner, pr.dmg, pr.type === 'fire' ? 16 : 7, pr.type === 'fire' ? 'fire' : 'bolt');
+    if (gameState === 'fight' && !pr.dead && pr.owner) {
+      for (const target of enemiesOf(pr.owner)) {
+        if (target.dead || target.invuln > 0) continue;
+        const pd = Math.hypot(pr.x - target.x, pr.z - target.z);
+        if (pd < pr.r + target.radius && Math.abs(pr.y - (target.y + 80)) < 110) {
+          pr.dead = true;
+          hitTarget(target, pr.owner, pr.dmg, pr.type === 'fire' ? 16 : 7, pr.type === 'fire' ? 'fire' : 'bolt');
+          break;
+        }
+      }
     }
   }
   for (const pr of projectiles) if (pr.dead) pr.dispose();
@@ -1932,17 +2202,18 @@ function simulate() {
   }
   if (gameState === 'upgrade') {
     stateT++;
-    const chooser = upgradePhase === 0 ? p1 : p2;
+    const ts = teamState[upgradePhase];
     const cards = upgradeChoices[upgradePhase];
-    if (chooser.ai) {
-      if (stateT >= 50) { upgradeSel = Math.floor(Math.random() * cards.length); commitUpgrade(); }
-    } else if (chooser.netRemote) {
-      // 联机：等待客户端选卡（15 秒无响应则兜底选择第一张）
+    if (upgradePhase === 1 && ts.remote) {
+      // 联机：等待蓝方客户端选卡（15 秒无响应则兜底选择第一张）
       if (net.guestPick >= 0) {
         upgradeSel = clamp(net.guestPick | 0, 0, cards.length - 1);
         net.guestPick = -1;
         commitUpgrade();
       } else if (stateT >= 900) { upgradeSel = 0; commitUpgrade(); }
+    } else if (!ts.hasHuman) {
+      // 全 AI 一方：随机挑选一张
+      if (stateT >= 50) { upgradeSel = Math.floor(Math.random() * cards.length); commitUpgrade(); }
     } else {
       const prev = consume(upgradePhase === 0 ? 'KeyA' : 'ArrowLeft');
       const next = consume(upgradePhase === 0 ? 'KeyD' : 'ArrowRight');
@@ -1961,30 +2232,29 @@ function simulate() {
     stateT++;
     if (stateT % 45 === 0 && stateT < 135) netSfx('count');
     if (stateT === 135) netSfx('go');
-    p1.animT++; p2.animT++;
-    p1.pose(); p2.pose();
+    for (const f of fighters) { f.animT++; f.pose(); }
     updateFloaters(); updateSparks(); updateRings();
     if (stateT >= 160) { gameState = 'fight'; stateT = 0; }
     clearPressed(); return;
   }
   if (gameState === 'fight') {
     roundTime--;
-    p1.update(p2); p2.update(p1);
+    for (const f of fighters) f.update();
     resolveBodyCollision();
     updateProjectiles();
     updateFloaters();
-    p1.pose(); p2.pose();
+    for (const f of fighters) f.pose();
     updateSparks(); updateRings();
     if (roundTime <= 0) timeOut();
     clearPressed(); return;
   }
   if (gameState === 'roundover') {
     stateT++;
-    p1.update(p2); p2.update(p1);
+    for (const f of fighters) f.update();
     resolveBodyCollision();
     updateProjectiles();
     updateFloaters();
-    p1.pose(); p2.pose();
+    for (const f of fighters) f.pose();
     updateSparks(); updateRings();
     if (stateT >= 150) {
       if (wins[0] >= 2 || wins[1] >= 2) {
@@ -2007,9 +2277,18 @@ function fixedUpdate() {
 // ================= 相机跟随 =================
 const _mid = new THREE.Vector3();
 function updateCamera() {
-  const midX = (p1.x + p2.x) / 2, midZ = (p1.z + p2.z) / 2;
-  const sep = Math.hypot(p1.x - p2.x, p1.z - p2.z);
-  const D = clamp(900 + Math.max(0, sep - 360) * 1.15, 900, 2050);
+  let sx = 0, sz = 0;
+  let list = fighters.filter(f => !f.dead);
+  if (!list.length) list = fighters;
+  let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
+  for (const f of list) {
+    sx += f.x; sz += f.z;
+    minX = Math.min(minX, f.x); maxX = Math.max(maxX, f.x);
+    minZ = Math.min(minZ, f.z); maxZ = Math.max(maxZ, f.z);
+  }
+  const midX = sx / list.length, midZ = sz / list.length;
+  const spread = Math.max(maxX - minX, maxZ - minZ);
+  const D = clamp(1050 + Math.max(0, spread - 560) * 0.62, 1050, 2900);
   let tx = midX, tz = midZ + D * 0.62, ty = D * 0.80;
   if (shakeT > 0) { const k = shakeMag * (shakeT / 14); tx += rand(-1, 1) * k * 4; ty += rand(-1, 1) * k * 4; tz += rand(-1, 1) * k * 4; }
   camera.position.lerp(_mid.set(tx, ty, tz), 0.12);
@@ -2017,76 +2296,94 @@ function updateCamera() {
 }
 
 // ================= HUD 绘制（2D 覆盖层） =================
-function drawHealthBar(f, left) {
-  const bw = 430, bh = 26, by = 34;
-  const bx = left ? 56 : W - 56 - bw;
-  const ratio = clamp(f.hp / f.maxHp, 0, 1);
-  const disp = clamp(f.hpDisplay / f.maxHp, 0, 1);
+// 队伍面板：显示该队 5 名英雄的生命 / 阵亡状态 / 击杀数 / 胜场
+function drawTeamPanel(side, left) {
+  const team = side === TEAM_RED ? redTeam : blueTeam;
+  const pw = 300, rowH = 30, headH = 42;
+  const ph = headH + TEAM_SIZE * rowH + 6;
+  const x0 = left ? 28 : W - 28 - pw, y0 = 20;
+  const col = side === TEAM_RED ? '#ff5a5f' : '#4fa8ff';
 
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  roundRect(bx - 4, by - 4, bw + 8, bh + 8, 6); ctx.fill();
-  ctx.fillStyle = 'rgba(18,20,38,0.95)';
-  roundRect(bx, by, bw, bh, 5); ctx.fill();
-  if (disp > ratio) {
-    const dx = left ? bx : bx + bw - bw * disp;
-    ctx.fillStyle = 'rgba(255,220,140,0.8)';
-    ctx.fillRect(dx, by, bw * Math.abs(disp - ratio), bh);
-  }
-  const fx = left ? bx : bx + bw - bw * ratio;
-  const hg = ctx.createLinearGradient(0, by, 0, by + bh);
-  hg.addColorStop(0, f.color); hg.addColorStop(1, f.color2);
-  ctx.fillStyle = hg;
-  roundRect(fx, by, Math.max(0, bw * ratio), bh, 5); ctx.fill();
-  ctx.fillStyle = 'rgba(255,255,255,0.22)';
-  roundRect(fx, by + 2, Math.max(0, bw * ratio), bh * 0.35, 4); ctx.fill();
-  ctx.strokeStyle = 'rgba(160,190,255,0.55)'; ctx.lineWidth = 2;
-  roundRect(bx, by, bw, bh, 5); ctx.stroke();
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  roundRect(x0 - 4, y0 - 4, pw + 8, ph + 8, 10); ctx.fill();
+  ctx.fillStyle = 'rgba(14,18,36,0.92)';
+  roundRect(x0, y0, pw, ph, 8); ctx.fill();
+  ctx.strokeStyle = col; ctx.lineWidth = 2;
+  roundRect(x0, y0, pw, ph, 8); ctx.stroke();
 
+  ctx.textBaseline = 'middle';
   ctx.textAlign = left ? 'left' : 'right';
-  ctx.textBaseline = 'alphabetic';
-  ctx.font = 'bold 20px "PingFang SC","Microsoft YaHei",sans-serif';
-  ctx.fillStyle = '#eaf0ff';
-  ctx.fillText(f.name, left ? bx + 2 : bx + bw - 2, by + bh + 24);
-
-  if (f.upgrades && f.upgrades.length) {
-    ctx.font = 'bold 14px "PingFang SC","Microsoft YaHei",sans-serif';
-    ctx.fillStyle = '#ffd166';
-    ctx.textAlign = left ? 'right' : 'left';
-    ctx.fillText('强化 +' + f.upgrades.length, left ? bx + bw - 2 : bx + 2, by + bh + 24);
-  }
-  ctx.font = 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif';
-  ctx.fillStyle = 'rgba(210,225,255,0.75)';
-  ctx.fillText(Math.ceil(f.hp) + ' / ' + f.maxHp, left ? bx + 2 : bx + bw - 2, by - 10);
-
+  ctx.font = 'bold 19px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = col;
+  ctx.fillText((side === TEAM_RED ? '红方' : '蓝方') + (teamState[side].hasHuman ? '' : ' · AI'), left ? x0 + 12 : x0 + pw - 12, y0 + 21);
+  ctx.textAlign = left ? 'right' : 'left';
+  ctx.font = 'bold 16px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = '#ffd166';
+  ctx.fillText('击杀 ' + kills[side], left ? x0 + pw - 12 : x0 + 12, y0 + 21);
+  // 胜场圆点
   for (let i = 0; i < 2; i++) {
-    const cx = left ? bx + 12 + i * 28 : bx + bw - 12 - i * 28;
-    ctx.beginPath(); ctx.arc(cx, by + bh + 42, 8, 0, TAU);
-    if (i < wins[f.side]) { ctx.fillStyle = f.color; ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); }
+    const cx = x0 + pw / 2 - 10 + i * 20;
+    ctx.beginPath(); ctx.arc(cx, y0 + 21, 6, 0, TAU);
+    if (i < wins[side]) { ctx.fillStyle = col; ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); }
     else { ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.5; ctx.stroke(); }
   }
 
-  const iw = 48, ih = 50, gap = 8, iy = by + bh + 62;
+  for (let i = 0; i < TEAM_SIZE; i++) {
+    const f = team[i];
+    const ry = y0 + headH + i * rowH;
+    const bx = x0 + 12, bw = pw - 24, bh = 9;
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = f.dead ? 'rgba(150,160,190,0.5)' : '#dfe7ff';
+    ctx.fillText(f.name, bx, ry + 5);
+    if (f.dead) {
+      ctx.textAlign = 'right';
+      ctx.fillStyle = 'rgba(255,150,150,0.85)';
+      ctx.fillText('复活 ' + Math.ceil(f.respawnT / 60) + 's', bx + bw, ry + 5);
+    }
+    ctx.fillStyle = 'rgba(8,10,22,0.92)';
+    roundRect(bx, ry + 13, bw, bh, 4); ctx.fill();
+    if (!f.dead) {
+      const r = clamp(f.hp / f.maxHp, 0, 1);
+      ctx.fillStyle = f.color;
+      roundRect(bx, ry + 13, Math.max(0, bw * r), bh, 4); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.22)';
+      roundRect(bx, ry + 14, Math.max(0, bw * r), bh * 0.4, 3); ctx.fill();
+    }
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+// 本地真人技能栏
+function drawSkillBar(f, align) {
+  if (!f) return;
+  const iw = 52, ih = 54, gap = 10, n = f.skills.length;
+  const totalW = n * iw + (n - 1) * gap;
+  const x0 = align === 'left' ? 60 : W - 60 - totalW;
+  const iy = H - 92;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  for (let i = 0; i < f.skills.length; i++) {
+  for (let i = 0; i < n; i++) {
     const sk = f.skills[i];
-    const ix = left ? bx + 6 + i * (iw + gap) : bx + bw - iw - 6 - i * (iw + gap);
+    const ix = x0 + i * (iw + gap);
     const cd = (f.cds && f.cds[i]) || 0;
-    const ratio2 = clamp(cd / sk.cd, 0, 1);
-    const ready = cd <= 0;
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    const ratio = clamp(cd / sk.cd, 0, 1);
+    const ready = cd <= 0 && !f.dead;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
     roundRect(ix, iy, iw, ih, 8); ctx.fill();
-    ctx.font = 'bold 12px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
     ctx.fillStyle = ready ? '#ffd166' : 'rgba(160,180,220,0.6)';
-    ctx.fillText(sk.label.slice(0, 2), ix + iw / 2, iy + 15);
-    ctx.font = 'bold 10px "PingFang SC",sans-serif';
-    ctx.fillStyle = 'rgba(200,215,245,0.55)';
-    ctx.fillText(sk.key.replace('Key', ''), ix + iw / 2, iy + ih - 10);
+    ctx.fillText(sk.label.slice(0, 2), ix + iw / 2, iy + 16);
+    ctx.font = 'bold 11px "PingFang SC",sans-serif';
+    ctx.fillStyle = 'rgba(200,215,245,0.6)';
+    ctx.fillText(sk.key.replace('Key', ''), ix + iw / 2, iy + ih - 11);
     if (!ready) {
-      ctx.fillStyle = 'rgba(10,14,30,0.72)';
-      roundRect(ix, iy, iw, ih * ratio2, 8); ctx.fill();
-      ctx.font = 'bold 16px "PingFang SC",sans-serif';
-      ctx.fillStyle = '#eaf0ff';
-      ctx.fillText(Math.ceil(cd / 60), ix + iw / 2, iy + 28);
+      ctx.fillStyle = 'rgba(10,14,30,0.7)';
+      roundRect(ix, iy, iw, ih * ratio, 8); ctx.fill();
+      if (cd > 0) {
+        ctx.font = 'bold 17px "PingFang SC",sans-serif';
+        ctx.fillStyle = '#eaf0ff';
+        ctx.fillText(Math.ceil(cd / 60), ix + iw / 2, iy + 30);
+      }
     } else {
       ctx.strokeStyle = 'rgba(255,209,102,0.9)'; ctx.lineWidth = 2;
       roundRect(ix, iy, iw, ih, 8); ctx.stroke();
@@ -2114,7 +2411,8 @@ function drawFloaters() {
 
 // 英雄头顶血条 + 连击称号
 function drawOverhead() {
-  for (const f of [p1, p2]) {
+  for (const f of fighters) {
+    if (f.dead) continue;
     const sp = project(f.x, f.y + 205, f.z);
     if (sp.z <= 1) {
       const ratio = clamp(f.hp / f.maxHp, 0, 1);
@@ -2163,23 +2461,34 @@ function drawMinimap() {
   ctx.fillStyle = 'rgba(150,190,255,0.30)';
   ctx.beginPath(); ctx.arc(mx(0), mz(0), 3, 0, TAU); ctx.fill();
 
+  // 双方基地
+  ctx.fillStyle = 'rgba(255,90,95,0.18)';
+  ctx.fillRect(mx(-SPAWN_X - 260), mz(-620), 260 / ARENA_HX * mw * 2, 620 / ARENA_HZ * mh * 2);
+  ctx.fillStyle = 'rgba(79,168,255,0.18)';
+  ctx.fillRect(mx(SPAWN_X) - 260 / ARENA_HX * mw * 2, mz(-620), 260 / ARENA_HX * mw * 2, 620 / ARENA_HZ * mh * 2);
+
   // 障碍物
   ctx.fillStyle = 'rgba(120,160,255,0.78)';
   for (const o of OBSTACLES) {
     ctx.fillRect(mx(o.x - o.hx), mz(o.z - o.hz), o.hx / ARENA_HX * mw, o.hz / ARENA_HZ * mh);
   }
 
-  // 双方标记（圆点 + 朝向指示）
-  for (const f of [p1, p2]) {
+  // 十名英雄标记（圆点 + 朝向指示）
+  for (const f of fighters) {
+    if (f.dead) continue;
     const px = mx(f.x), pz = mz(f.z);
-    ctx.strokeStyle = f.color; ctx.lineWidth = 2;
+    ctx.strokeStyle = f.color; ctx.lineWidth = 1.6;
     ctx.beginPath(); ctx.moveTo(px, pz);
-    ctx.lineTo(px + Math.sin(f.angle) * 12, pz + Math.cos(f.angle) * 12);
+    ctx.lineTo(px + Math.sin(f.angle) * 11, pz + Math.cos(f.angle) * 11);
     ctx.stroke();
     ctx.fillStyle = f.color;
-    ctx.beginPath(); ctx.arc(px, pz, 5, 0, TAU); ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(px, pz, 5, 0, TAU); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px, pz, 4.5, 0, TAU); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(px, pz, 4.5, 0, TAU); ctx.stroke();
+    if (humans.indexOf(f) >= 0) {   // 本机操控的角色加高亮圈
+      ctx.strokeStyle = '#ffd166'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(px, pz, 8, 0, TAU); ctx.stroke();
+    }
   }
 
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
@@ -2190,10 +2499,12 @@ function drawMinimap() {
 }
 
 function drawHUD() {
-  drawHealthBar(p1, true);
-  drawHealthBar(p2, false);
+  drawTeamPanel(TEAM_RED, true);
+  drawTeamPanel(TEAM_BLUE, false);
   drawOverhead();
   drawMinimap();
+  if (humans[0]) drawSkillBar(humans[0], humans[0].side === TEAM_RED ? 'left' : 'right');
+  if (humans[1]) drawSkillBar(humans[1], humans[1].side === TEAM_RED ? 'left' : 'right');
 
   const sec = Math.ceil(roundTime / 60);
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -2213,13 +2524,13 @@ function drawHUD() {
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.font = '14px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(170,190,225,0.5)';
-  ctx.fillText('红方：WASD 走位  F 普攻  G 冲刺  H 旋风', 56, H - 26);
+  ctx.fillText(humans.length > 1 ? '红方：WASD 走位  F 普攻  G 冲刺  H 旋风' : '5v5 · 本机操控红方 0 号', 56, H - 26);
   ctx.textAlign = 'right';
   ctx.fillText(aiLevel ? '蓝方：电脑 AI（' + DIFFS[aiLevel].label + '）'
-    : net.active ? '蓝方：对手（联机）'
+    : net.active ? '蓝方：玩家联机'
     : '蓝方：↑↓←→ 走位  K 普攻  L 火球  J 新星', W - 56, H - 26);
   ctx.textAlign = 'center';
-  ctx.fillText((net.active ? '' : 'Enter 重开   ') + 'P 暂停   M 静音' + (muted ? '（已静音）' : ''), W / 2, H - 26);
+  ctx.fillText((net.active ? '' : 'R 重开   ') + 'P 暂停   M 静音' + (muted ? '（已静音）' : ''), W / 2, H - 12);
   ctx.textBaseline = 'alphabetic';
 
   if (net.active) {
@@ -2288,17 +2599,18 @@ function drawRoundOver() {
     ctx.strokeText('平 局', 0, 0);
     ctx.fillStyle = '#dfe6ff'; ctx.fillText('平 局', 0, 0);
   } else {
-    const w = roundResult === 0 ? p1 : p2;
+    const winT = roundResult === TEAM_RED ? redTeam[0] : blueTeam[0];
+    const winName = roundResult === TEAM_RED ? '红 方' : '蓝 方';
     ctx.font = 'bold 96px "PingFang SC","Microsoft YaHei",sans-serif';
     ctx.lineWidth = 12; ctx.strokeStyle = 'rgba(0,0,0,.6)';
     ctx.strokeText('K.O.', 0, -40);
     ctx.fillStyle = '#ffffff'; ctx.fillText('K.O.', 0, -40);
     ctx.font = 'bold 44px "PingFang SC","Microsoft YaHei",sans-serif';
     const g = ctx.createLinearGradient(-200, 0, 200, 0);
-    g.addColorStop(0, w.color2); g.addColorStop(0.5, w.color); g.addColorStop(1, w.color2);
+    g.addColorStop(0, winT.color2); g.addColorStop(0.5, winT.color); g.addColorStop(1, winT.color2);
     ctx.fillStyle = g;
-    ctx.strokeText(w.name + ' 获胜', 0, 50);
-    ctx.fillText(w.name + ' 获胜', 0, 50);
+    ctx.strokeText(winName + ' 获胜', 0, 50);
+    ctx.fillText(winName + ' 获胜', 0, 50);
   }
   ctx.restore();
   ctx.globalAlpha = appear;
@@ -2326,7 +2638,11 @@ function drawUpgrade() {
   ctx.fillStyle = 'rgba(5,7,16,0.85)';
   ctx.fillRect(0, 0, W, H);
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  const chooser = upgradePhase === 0 ? p1 : p2;
+  const ts = teamState[upgradePhase];
+  const chooser = (upgradePhase === 0 ? redTeam : blueTeam)[0];
+  const teamName = upgradePhase === 0 ? '红方' : '蓝方';
+  const auto = !ts.hasHuman;
+  const waiting = upgradePhase === 1 && ts.remote;
   const cards = upgradeChoices[upgradePhase];
 
   ctx.font = 'bold 52px "PingFang SC","Microsoft YaHei",sans-serif';
@@ -2338,11 +2654,12 @@ function drawUpgrade() {
 
   ctx.font = 'bold 26px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = chooser.color;
-  ctx.fillText(chooser.ai ? ('电脑 ' + chooser.name + ' 正在挑选…') : (chooser.name + '，请选择一项强化'), W / 2, 158);
+  ctx.fillText(waiting ? (teamName + '玩家正在挑选…') : auto ? (teamName + '（AI）正在挑选…') : (teamName + '，请选择一项强化（全队生效）'), W / 2, 158);
 
   ctx.font = 'bold 20px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(200,215,255,0.7)';
-  const hint = chooser.ai ? '电脑将随机选择一张'
+  const hint = waiting ? '等待联机玩家选卡…'
+    : auto ? '电脑将随机选择一张'
     : upgradePhase === 0 ? 'A / D 切换　　F 确认' : '← / → 切换　　K 确认';
   ctx.fillText(hint, W / 2, 196);
 
@@ -2384,7 +2701,7 @@ function drawUpgrade() {
     const text = typeof card.desc === 'function' ? card.desc(chooser) : card.desc;
     let ly = cy + 168;
     for (const ln of wrapText(text, cw - 56)) { ctx.fillText(ln, mid, ly); ly += 32; }
-    const got = chooser.upgradeCounts[card.id] || 0;
+    const got = ts.upgradeCounts[card.id] || 0;
     if (got > 0) {
       ctx.font = 'bold 15px "PingFang SC",sans-serif';
       ctx.fillStyle = 'rgba(255,209,102,0.85)';
@@ -2394,11 +2711,11 @@ function drawUpgrade() {
   }
   ctx.font = 'bold 20px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.fillStyle = p1.color;
-  ctx.fillText(p1.name + '　已强化 ' + p1.upgrades.length + ' 项', 60, H - 40);
+  ctx.fillStyle = redTeam[0].color;
+  ctx.fillText('红方　已强化 ' + teamState[0].upgrades.length + ' 项', 60, H - 40);
   ctx.textAlign = 'right';
-  ctx.fillStyle = p2.color;
-  ctx.fillText(p2.name + '　已强化 ' + p2.upgrades.length + ' 项', W - 60, H - 40);
+  ctx.fillStyle = blueTeam[0].color;
+  ctx.fillText('蓝方　已强化 ' + teamState[1].upgrades.length + ' 项', W - 60, H - 40);
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -2420,22 +2737,21 @@ function drawMenu() {
 
   ctx.font = 'bold 22px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(180,205,255,' + (0.6 + pulse * 0.4) + ')';
-  ctx.fillText('3D  MOBA  ·  双 人 对 战', W / 2, 176);
+  ctx.fillText('3D  MOBA  ·  5 v 5  团 队 对 战', W / 2, 176);
 
-  const drawCard = (f, cx) => {
+  const drawCard = (team, side, cx) => {
     ctx.save();
     ctx.fillStyle = 'rgba(12,16,34,0.85)';
     roundRect(cx - 190, 208, 380, 176, 16); ctx.fill();
-    ctx.strokeStyle = f.color; ctx.lineWidth = 3;
+    ctx.strokeStyle = team[0].color; ctx.lineWidth = 3;
     roundRect(cx - 190, 208, 380, 176, 16); ctx.stroke();
     ctx.textAlign = 'left';
     ctx.font = 'bold 30px "PingFang SC","Microsoft YaHei",sans-serif';
-    ctx.fillStyle = f.color;
-    ctx.fillText(f.name, cx - 158, 246);
-    const isSword = f.type === 'sword';
-    const lines = isSword
-      ? ['近战刺客 · 高机动', 'WASD 走位', 'F 剑气 · G 冲刺 · H 旋风']
-      : ['远程法师 · 高爆发', '↑↓←→ 走位', 'K 魔弹 · L 火球 · J 新星'];
+    ctx.fillStyle = team[0].color;
+    ctx.fillText(side === TEAM_RED ? '红方 · 5 人' : '蓝方 · 5 人', cx - 158, 246);
+    const lines = side === TEAM_RED
+      ? ['本机操控 0 号（烈焰剑客）', 'WASD 走位  F 普攻', 'G 冲刺 · H 旋风']
+      : ['其余 4 名由 AI 自动参战', '每回合团灭或积分定胜负', '击倒后 5 秒复活'];
     ctx.font = '16px "PingFang SC","Microsoft YaHei",sans-serif';
     lines.forEach((ln, i) => {
       ctx.fillStyle = i === 0 ? 'rgba(255,209,102,0.92)' : 'rgba(200,215,245,0.82)';
@@ -2443,8 +2759,8 @@ function drawMenu() {
     });
     ctx.restore();
   };
-  drawCard(p1, W / 2 - 205);
-  drawCard(p2, W / 2 + 205);
+  drawCard(redTeam, TEAM_RED, W / 2 - 205);
+  drawCard(blueTeam, TEAM_BLUE, W / 2 + 205);
 
   MENU.forEach((o, i) => {
     const y = 424 + i * 42;
@@ -2484,7 +2800,8 @@ function drawGameOver() {
   ctx.fillStyle = 'rgba(5,7,16,0.72)';
   ctx.fillRect(0, 0, W, H);
   const winSide = wins[0] > wins[1] ? 0 : 1;
-  const w = winSide === 0 ? p1 : p2;
+  const w = winSide === TEAM_RED ? redTeam[0] : blueTeam[0];
+  const winName = winSide === TEAM_RED ? '红 方' : '蓝 方';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   const appear = clamp(stateT / 30, 0, 1);
   ctx.save();
@@ -2500,10 +2817,10 @@ function drawGameOver() {
   ctx.translate(W / 2, 340); ctx.scale(pulse, pulse);
   ctx.font = 'bold 110px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.lineWidth = 14; ctx.strokeStyle = 'rgba(0,0,0,.6)';
-  ctx.strokeText(w.name, 0, 0);
+  ctx.strokeText(winName, 0, 0);
   const g = ctx.createLinearGradient(-300, 0, 300, 0);
   g.addColorStop(0, w.color2); g.addColorStop(0.5, w.color); g.addColorStop(1, w.color2);
-  ctx.fillStyle = g; ctx.fillText(w.name, 0, 0);
+  ctx.fillStyle = g; ctx.fillText(winName, 0, 0);
   ctx.restore();
   ctx.globalAlpha = appear;
   ctx.font = 'bold 40px "PingFang SC","Microsoft YaHei",sans-serif';
@@ -2679,7 +2996,7 @@ function draw2DScene() {
   }
 
   // 技能指向
-  drawAim2D(p1); drawAim2D(p2);
+  for (const f of fighters) drawAim2D(f);
   // 地面冲击环
   for (const r of rings) {
     if (!r.active) continue;
@@ -2695,7 +3012,7 @@ function draw2DScene() {
   ctx.globalAlpha = 1;
 
   // 角色（后画的覆盖前面的：按 z 从远到近）
-  const order = p1.z <= p2.z ? [p1, p2] : [p2, p1];
+  const order = fighters.filter(f => !f.dead).slice().sort((a, b) => a.z - b.z);
   for (const f of order) drawFighter2D(f);
 
   // 弹道
@@ -2729,8 +3046,7 @@ function render() {
   ctx.clearRect(0, 0, W, H);
 
   // 血条平滑
-  p1.hpDisplay += (p1.hp - p1.hpDisplay) * 0.14;
-  p2.hpDisplay += (p2.hp - p2.hpDisplay) * 0.14;
+  for (const f of fighters) f.hpDisplay += (f.hp - f.hpDisplay) * 0.14;
 
   updateCamera();
   if (use2D) draw2DScene(); else renderer.render(scene, camera);
