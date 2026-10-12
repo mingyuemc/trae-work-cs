@@ -174,6 +174,10 @@ const SFX = {
   whirl() { tone(340, 0.42, 'sawtooth', 0.08, 880); noiseHit(0.38, 0.05, 1600); },
   nova()  { tone(1250, 0.34, 'sine', 0.09, 320); tone(760, 0.3, 'triangle', 0.06, 1600); noiseHit(0.28, 0.05, 2600); },
   ready() { tone(1180, 0.08, 'sine', 0.045, 1500); },
+  bolt()   { tone(1500, 0.2, 'sawtooth', 0.07, 420); noiseHit(0.14, 0.04, 3000); },
+  meteor() { tone(95, 0.55, 'sawtooth', 0.12, 38); noiseHit(0.38, 0.08, 600); },
+  heal()   { tone(660, 0.32, 'sine', 0.06, 990); tone(990, 0.36, 'sine', 0.05, 1320); },
+  shield() { tone(300, 0.36, 'triangle', 0.07, 880); noiseHit(0.22, 0.04, 2200); },
   nav()   { tone(600, 0.06, 'square', 0.05); },
   count() { tone(680, 0.12, 'sine', 0.07); },
   go()    { tone(880, 0.28, 'sine', 0.09, 1250); }
@@ -829,15 +833,21 @@ function nearestEnemy(f) {
 function teamAlive(side) { const t = side === TEAM_RED ? redTeam : blueTeam; return t.some(f => !f.dead); }
 
 // ================= 技能与连招表 =================
+// 技能池：每名英雄从中挑选 2 个（key 为默认按键，实际按键由操控方案 skillKeys 决定）
+const SKILL_DEF = {
+  dash:   { id: 'dash',   key: 'KeyG', label: '冲刺斩',   cd: 150, kind: 'melee',  desc: '向敌方突进并短暂无敌' },
+  whirl:  { id: 'whirl',  key: 'KeyH', label: '烈焰旋风', cd: 260, kind: 'melee',  desc: '原地旋转，持续打击周围敌人' },
+  fire:   { id: 'fire',   key: 'KeyL', label: '爆裂火球', cd: 200, kind: 'ranged', desc: '发射穿透火球，命中造成高额伤害' },
+  nova:   { id: 'nova',   key: 'KeyJ', label: '寒霜新星', cd: 260, kind: 'ranged', desc: '以自身为中心爆发寒气，击飞周围敌人' },
+  bolt:   { id: 'bolt',   key: 'KeyL', label: '连锁闪电', cd: 210, kind: 'ranged', desc: '电击最近敌人并连锁至附近目标' },
+  meteor: { id: 'meteor', key: 'KeyL', label: '陨石天降', cd: 300, kind: 'ranged', desc: '在最近敌人处召唤陨石，范围重击' },
+  heal:   { id: 'heal',   key: 'KeyL', label: '治愈之光', cd: 300, kind: 'support', desc: '为自身与周围队友回复生命' },
+  shield: { id: 'shield', key: 'KeyH', label: '护体金盾', cd: 320, kind: 'support', desc: '短时间无敌并抵挡伤害' }
+};
+// 未指定技能的英雄（AI 队友）按类型取默认技能组
 const SKILLS = {
-  sword: [
-    { id: 'dash',  key: 'KeyG', label: '冲刺斩',   cd: 150 },
-    { id: 'whirl', key: 'KeyH', label: '烈焰旋风', cd: 260 }
-  ],
-  mage: [
-    { id: 'fire', key: 'KeyL', label: '爆裂火球', cd: 200 },
-    { id: 'nova', key: 'KeyJ', label: '寒霜新星', cd: 260 }
-  ]
+  sword: [SKILL_DEF.dash, SKILL_DEF.whirl],
+  mage: [SKILL_DEF.fire, SKILL_DEF.nova]
 };
 
 const COMBO_SCALE = [1, 1, 0.9, 0.82, 0.74, 0.66, 0.6, 0.55, 0.5];
@@ -1022,10 +1032,27 @@ function makeAimIndicator(color) {
   return mesh;
 }
 
+// 释放一组网格的几何与材质
+function disposeObject(root) {
+  if (!root) return;
+  root.traverse(o => {
+    if (o.isMesh) {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) {
+        const ms = Array.isArray(o.material) ? o.material : [o.material];
+        for (const m of ms) if (m && m.dispose) m.dispose();
+      }
+    } else if (o.isSprite && o.material) {
+      o.material.dispose();
+    }
+  });
+}
+
 // ================= 角色逻辑（3D） =================
 class Fighter {
   constructor(cfg) {
     this.name = cfg.name;
+    this.heroId = cfg.heroId || null;
     this.color = cfg.color;
     this.color2 = cfg.color2;
     this.type = cfg.type;
@@ -1045,7 +1072,7 @@ class Fighter {
     this.dmgMul = 1;
     this.kills = 0;
     this.baseMaxHp = cfg.maxHp;
-    this.skills = SKILLS[cfg.type];
+    this.skills = cfg.skills ? cfg.skills.map(id => SKILL_DEF[id]) : SKILLS[cfg.type];
     this.resetMods();
     // 3D 表现
     const built = cfg.type === 'sword' ? buildSwordHero(cfg.color, cfg.color2) : buildMageHero(cfg.color, cfg.color2);
@@ -1065,6 +1092,33 @@ class Fighter {
     };
     this.upgrades = [];
     this.upgradeCounts = {};
+  }
+  // 选人：按英雄定义重建外观、属性与技能（用于本机操控的角色）
+  applyHero(def) {
+    this.heroId = def.id;
+    this.name = def.name;
+    this.color = def.color; this.color2 = def.color2;
+    this.type = def.type;
+    this.baseMaxHp = def.maxHp;
+    this.speed = def.speed;
+    this.dmg = def.type === 'sword' ? 12 : 8;
+    this.skills = def.skills.map(id => SKILL_DEF[id]);
+    // 重建 3D 外观（旧模型从场景移除并释放显存）
+    scene.remove(this.model);
+    scene.remove(this.aimMesh);
+    disposeObject(this.model);
+    if (this.aimMesh) {
+      if (this.aimMesh.geometry) this.aimMesh.geometry.dispose();
+      if (this.aimMesh.material) this.aimMesh.material.dispose();
+    }
+    const built = def.type === 'sword' ? buildSwordHero(def.color, def.color2) : buildMageHero(def.color, def.color2);
+    this.model = built.group;
+    this.parts = built.parts;
+    this.mats = built.mats;
+    scene.add(this.model);
+    this.aimMesh = makeAimIndicator(def.color);
+    this.resetMods();
+    this.reset();
   }
   applyUpgrade(up) {
     up.apply(this);
@@ -1224,7 +1278,7 @@ class Fighter {
       up: !!keys[c.up], down: !!keys[c.down],
       left: !!keys[c.left], right: !!keys[c.right],
       attack: consume(c.attack),
-      skills: this.skills.map(s => consume(s.key))
+      skills: this.skills.map((s, i) => consume((c.skillKeys && c.skillKeys[i]) || s.key))
     };
   }
 
@@ -1287,6 +1341,62 @@ class Fighter {
         if (e.dead || e.invuln > 0) continue;
         if (distXZ(this, e) < rr) hitTarget(e, this, Math.round(16 * this.mods.power * this.mods.skillPower[1] * this.dmgMul), 22, 'nova', -14);
       }
+    } else if (sk.id === 'bolt') {
+      // 连锁闪电：电击最近敌人，并向附近目标连锁
+      this.targetAngle = this.angle = opp ? aimAt(this, opp) : this.angle;
+      this.attackT = 18; this.attackDur = 18;
+      netSfx('bolt');
+      const dmgBase = Math.round(20 * this.mods.power * this.mods.skillPower[0] * this.dmgMul);
+      let cur = opp, hitSet = new Set(), chain = 0, src = this;
+      while (cur && chain < 3 && hitSet.size < 4) {
+        hitSet.add(cur);
+        netRing(cur.x, cur.z, 4, 90, '#cfa8ff', 16);
+        netHit(cur.x, cur.y + 90, cur.z, 'nova');
+        hitTarget(cur, this, Math.max(1, Math.round(dmgBase * Math.pow(0.75, chain))), 8, 'nova');
+        chain++;
+        src = cur;
+        let next = null, bestD = 320 * this.mods.range;
+        for (const e of enemiesOf(this)) {
+          if (e.dead || hitSet.has(e)) continue;
+          const d = distXZ(src, e);
+          if (d < bestD) { bestD = d; next = e; }
+        }
+        cur = next;
+      }
+    } else if (sk.id === 'meteor') {
+      // 陨石天降：在最近敌人处造成范围重击
+      this.attackT = 26; this.attackDur = 26;
+      netSfx('meteor'); netShake(12);
+      const tx = opp ? opp.x : this.x + Math.sin(this.angle) * 300;
+      const tz = opp ? opp.z : this.z + Math.cos(this.angle) * 300;
+      const rr = 260 * this.mods.range;
+      netRing(tx, tz, 30, rr, '#ff9a3c', 30);
+      netHit(tx, 90, tz, 'fire');
+      for (const e of enemiesOf(this)) {
+        if (e.dead || e.invuln > 0) continue;
+        if (Math.hypot(e.x - tx, e.z - tz) < rr) hitTarget(e, this, Math.round(30 * this.mods.power * this.mods.skillPower[0] * this.dmgMul), 24, 'fire', -12);
+      }
+    } else if (sk.id === 'heal') {
+      // 治愈之光：为自身与周围队友回复生命
+      netSfx('heal');
+      const rr = 460 * this.mods.range;
+      netRing(this.x, this.z, 20, rr, '#9dffc0', 28);
+      for (const a of alliesOf(this)) {
+        if (a.dead) continue;
+        if (a !== this && distXZ(this, a) > rr) continue;
+        const amt = Math.round(a.maxHp * 0.28 * this.mods.skillPower[0]);
+        const before = a.hp;
+        a.hp = Math.min(a.maxHp, a.hp + amt);
+        const healed = a.hp - before;
+        if (healed > 0) netFloater({ x: a.x, y: a.y + 180, z: a.z, text: '+' + healed, vy: 1.4, life: 46, color: '#7dffa8' });
+      }
+      this.invuln = Math.max(this.invuln, 12);
+    } else if (sk.id === 'shield') {
+      // 护体金盾：短时间无敌
+      netSfx('shield');
+      this.invuln = Math.max(this.invuln, Math.round(100 * this.mods.skillPower[0]));
+      netRing(this.x, this.z, 10, 120, '#ffd166', 30);
+      netFloater({ x: this.x, y: this.y + 190, z: this.z, text: '护盾', vy: 1.2, life: 50, color: '#ffd166' });
     }
     this.cds[i] = Math.max(30, Math.round(sk.cd * this.mods.cd * this.mods.skillCd[i]));
   }
@@ -1386,6 +1496,7 @@ class Fighter {
 
   updateAim(opp) {
     const m = this.aimMesh, sk = this.skills[0];
+    if (sk.kind === 'support') { m.visible = false; return; }   // 辅助技能不显示指向线
     const ready = this.cds[0] <= 0 && gameState === 'fight' && opp && !this.dead;
     m.visible = !!ready;
     if (!m.visible) return;
@@ -1603,6 +1714,14 @@ function applySnapshot(s) {
   roundTime = s.rt;
   roundResult = (s.pr === undefined ? null : s.pr);
   paused = !!s.pa;
+  if (s.hero) {                       // 同步主机所选英雄的外观 / 技能
+    for (let side = 0; side < 2; side++) {
+      const f = side === 0 ? redTeam[0] : blueTeam[0];
+      const id = s.hero[side];
+      if (id && f.heroId !== id) { const d = HEROES.find(h => h.id === id); if (d) f.applyHero(d); }
+      else if (!id && f.heroId) f.applyHero(f.rosterDef);
+    }
+  }
   for (let i = 0; i < fighters.length; i++) applyFighterState(fighters[i], s.f[i]);
   netSyncProjectiles(s.pj || []);
   if (s.obs) applyObstacleLayout(s.obs.map(a => ({ x: a[0], z: a[1], hx: a[2], hz: a[3], h: a[4] })));
@@ -1635,6 +1754,7 @@ function netHostSend() {
     pr: (roundResult === null ? null : roundResult), pa: paused,
     f: fighters.map(fighterState),
     pj: projectiles.map(p => [p.__id, Math.round(p.x), Math.round(p.y), Math.round(p.z), p.type, p.color, p.r]),
+    hero: [redTeam[0].heroId || null, blueTeam[0].heroId || null],
     ev: net.events
   };
   // 障碍布局变更时随快照下发（保持两端一致）
@@ -1786,6 +1906,7 @@ function startNetMatch() {
   teamState[0].hasHuman = false; teamState[0].remote = false;
   teamState[1].hasHuman = false; teamState[1].remote = false;
   const host = redTeam[0]; host.ai = null; host.controls = SCHEME_A; humans.push(host); teamState[0].hasHuman = true;
+  host.applyHero(HEROES[selHero[0]]);      // 主机沿用选人结果
   for (const peer of net.peers) {
     const f = fighters[peer.slot];
     f.ai = null; f.netRemote = true; f.netPeer = peer; f.controls = SCHEME_A; f.dmgMul = 1;
@@ -1993,8 +2114,8 @@ let currentMode = 0;
 let aiLevel = null;
 
 // ---- 同屏真人控制方案 ----
-const SCHEME_A = { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', attack: 'KeyF' };                       // 红方主控
-const SCHEME_B = { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', attack: 'KeyK' };   // 蓝方副控
+const SCHEME_A = { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', attack: 'KeyF', skillKeys: ['KeyG', 'KeyH'] };                       // 红方主控
+const SCHEME_B = { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', attack: 'KeyK', skillKeys: ['KeyL', 'KeyJ'] };   // 蓝方副控
 
 // ---- 队伍状态（技能强化按队共享） ----
 const teamState = [
@@ -2022,6 +2143,36 @@ const ROSTER = [
   ]
 ];
 
+// ---- 可选英雄：不同英雄拥有不同的两个技能 ----
+const HEROES = [
+  { id: 'blaze',   name: '烈焰剑客', color: '#ff5a5f', color2: '#a81f38', type: 'sword',
+    maxHp: 220, speed: 5.9, skills: ['dash', 'whirl'],  tag: '近战 · 爆发',
+    desc: '突进斩杀后衔接范围旋风，适合贴身强攻。' },
+  { id: 'aegis',   name: '苍穹剑士', color: '#5b8cff', color2: '#1e3a8e', type: 'sword',
+    maxHp: 245, speed: 5.6, skills: ['dash', 'shield'], tag: '近战 · 坦克',
+    desc: '高生命前排，突进开团并用金盾硬吃伤害。' },
+  { id: 'crimson', name: '绯红术士', color: '#ff6b8a', color2: '#9e2445', type: 'mage',
+    maxHp: 200, speed: 4.7, skills: ['fire', 'nova'],   tag: '远程 · 控场',
+    desc: '火球消耗配合新星击飞，攻守兼备。' },
+  { id: 'storm',   name: '秘法星灵', color: '#4fa8ff', color2: '#1b4f9e', type: 'mage',
+    maxHp: 200, speed: 4.9, skills: ['fire', 'bolt'],   tag: '远程 · 消耗',
+    desc: '连锁闪电可同时命中多名敌人，清线极快。' },
+  { id: 'meteor',  name: '陨星法师', color: '#ff8f5a', color2: '#a04a1c', type: 'mage',
+    maxHp: 195, speed: 4.6, skills: ['meteor', 'nova'], tag: '远程 · 重炮',
+    desc: '陨石范围重击，团战中一发定乾坤。' },
+  { id: 'priest',  name: '星辉祭司', color: '#7ee8a2', color2: '#1f7a45', type: 'mage',
+    maxHp: 210, speed: 4.8, skills: ['heal', 'shield'], tag: '辅助 · 续航',
+    desc: '治疗全队并施加无敌护盾，团战核心。' }
+];
+const HERO_DEFAULT = [0, 2];       // 红 / 蓝 方本地玩家的默认英雄下标
+
+// ---- 选人流程状态 ----
+let pendingMode = 0;               // 选人完成后要进入的模式
+let heroSelectPhase = 0;           // 当前正在选人的阵营（0 红 / 1 蓝）
+let heroPhaseTotal = 1;            // 需要选人的阵营数量（同屏双人为 2）
+let heroIndex = 0;                 // 当前高亮的下标
+let selHero = [0, 2];              // 各方已确认的英雄下标
+
 // ---- 实例化 10 名英雄并编入红蓝两队 ----
 const fighters = [];
 const redTeam = [];
@@ -2030,16 +2181,23 @@ for (let side = 0; side < 2; side++) {
   const team = side === TEAM_RED ? redTeam : blueTeam;
   for (let i = 0; i < TEAM_SIZE; i++) {
     const h = ROSTER[side][i];
-    const f = new Fighter({
-      name: h.name, color: h.color, color2: h.color2, type: h.type,
+    // 名册默认配置（未选人 / AI 角色使用；选人后可用它还原）
+    const def = {
+      id: null, name: h.name, color: h.color, color2: h.color2, type: h.type,
       maxHp: h.type === 'sword' ? 220 : 200,
       speed: h.type === 'sword' ? 5.9 : 4.7,
+      skills: SKILLS[h.type].map(s => s.id)
+    };
+    const f = new Fighter({
+      name: def.name, color: def.color, color2: def.color2, type: def.type,
+      maxHp: def.maxHp, speed: def.speed, skills: def.skills,
       side: side, slot: i,
       startX: side === TEAM_RED ? -SPAWN_X : SPAWN_X,
       startZ: SLOT_Z[i],
       startAngle: side === TEAM_RED ? Math.PI / 2 : -Math.PI / 2,
       controls: null
     });
+    f.rosterDef = def;
     fighters.push(f);
     team.push(f);
   }
@@ -2066,11 +2224,16 @@ function startMatch(modeIdx) {
   teamState[0].hasHuman = false; teamState[1].hasHuman = false;
   teamState[0].remote = false; teamState[1].remote = false;
 
+  // 先把上一局被选人改写的角色还原为名册默认
+  for (const f of fighters) if (f.rosterDef && f.heroId) f.applyHero(f.rosterDef);
+
   // 红方 0 号始终由本机操控
   const h1 = redTeam[0]; h1.controls = SCHEME_A; humans.push(h1); teamState[0].hasHuman = true;
+  h1.applyHero(HEROES[selHero[0]]);
   // 同屏双人：蓝方 0 号由本机第二位玩家操控
   if (modeId === 'pvp') {
     const h2 = blueTeam[0]; h2.controls = SCHEME_B; humans.push(h2); teamState[1].hasHuman = true;
+    h2.applyHero(HEROES[selHero[1]]);
   }
   const aiLv = aiLevel || 'normal';
   for (const f of fighters) if (humans.indexOf(f) < 0) f.ai = new EnemyAI(aiLv);
@@ -2184,9 +2347,43 @@ function simulate() {
     for (let i = 0; i < MENU.length; i++) if (consume('Digit' + (i + 1)) || consume('Numpad' + (i + 1))) menuIndex = i;
     if (menuIndex !== before) SFX.nav();
     if (consume('Enter') || consume('Space')) {
-      if (MENU[menuIndex].id === 'p2p') openNetLobby();
-      else startMatch(menuIndex);
+      // 先进入选人：同屏双人需要红蓝双方各选一次，联机仅主机选
+      pendingMode = menuIndex;
+      heroPhaseTotal = MENU[menuIndex].id === 'pvp' ? 2 : 1;
+      heroSelectPhase = 0;
+      heroIndex = selHero[0];
+      gameState = 'heroselect'; stateT = 0;
       SFX.go();
+    }
+    clearPressed(); return;
+  }
+  if (gameState === 'heroselect') {
+    stateT++;
+    const before = heroIndex;
+    if (consume('KeyA') || consume('ArrowLeft') || consume('KeyW') || consume('ArrowUp'))
+      heroIndex = (heroIndex + HEROES.length - 1) % HEROES.length;
+    if (consume('KeyD') || consume('ArrowRight') || consume('KeyS') || consume('ArrowDown'))
+      heroIndex = (heroIndex + 1) % HEROES.length;
+    for (let i = 0; i < HEROES.length; i++)
+      if (consume('Digit' + (i + 1)) || consume('Numpad' + (i + 1))) heroIndex = i;
+    if (heroIndex !== before) SFX.nav();
+    // 确认键：红方 F / Enter，蓝方 K / 空格
+    const confirm = heroSelectPhase === 0
+      ? (consume('KeyF') || consume('Enter'))
+      : (consume('KeyK') || consume('Space'));
+    const back = consume('Escape');
+    if (back) { gameState = 'menu'; stateT = 0; clearPressed(); return; }
+    if (confirm) {
+      selHero[heroSelectPhase] = heroIndex;
+      SFX.ready();
+      heroSelectPhase++;
+      if (heroSelectPhase >= heroPhaseTotal) {
+        if (MENU[pendingMode].id === 'p2p') openNetLobby();
+        else startMatch(pendingMode);
+      } else {
+        heroIndex = selHero[heroSelectPhase];
+        stateT = 0;
+      }
     }
     clearPressed(); return;
   }
@@ -2359,6 +2556,15 @@ function drawTeamPanel(side, left) {
   ctx.textBaseline = 'alphabetic';
 }
 
+// 生成某角色技能按键提示，例如 "G 冲刺斩  H 烈焰旋风"
+function humanSkillHint(f) {
+  if (!f || !f.skills) return '';
+  return f.skills.map((s, i) => {
+    const k = (f.controls && f.controls.skillKeys && f.controls.skillKeys[i]) || s.key;
+    return k.replace('Key', '') + ' ' + s.label;
+  }).join('  ');
+}
+
 // 本地真人技能栏
 function drawSkillBar(f, align) {
   if (!f) return;
@@ -2380,7 +2586,8 @@ function drawSkillBar(f, align) {
     ctx.fillText(sk.label.slice(0, 2), ix + iw / 2, iy + 16);
     ctx.font = 'bold 11px "PingFang SC",sans-serif';
     ctx.fillStyle = 'rgba(200,215,245,0.6)';
-    ctx.fillText(sk.key.replace('Key', ''), ix + iw / 2, iy + ih - 11);
+    const dispKey = (f.controls && f.controls.skillKeys && f.controls.skillKeys[i]) || sk.key;
+    ctx.fillText(dispKey.replace('Key', ''), ix + iw / 2, iy + ih - 11);
     if (!ready) {
       ctx.fillStyle = 'rgba(10,14,30,0.7)';
       roundRect(ix, iy, iw, ih * ratio, 8); ctx.fill();
@@ -2529,11 +2736,17 @@ function drawHUD() {
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.font = '14px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(170,190,225,0.5)';
-  ctx.fillText(humans.length > 1 ? '红方：WASD 走位  F 普攻  G 冲刺  H 旋风' : '5v5 · 本机操控红方 0 号', 56, H - 26);
+  const redHint = humans[0]
+    ? '红方 ' + humans[0].name + '：WASD 走位  F 普攻  ' + humanSkillHint(humans[0])
+    : '5v5 · 本机操控红方 0 号';
+  ctx.fillText(redHint, 56, H - 26);
   ctx.textAlign = 'right';
-  ctx.fillText(aiLevel ? '蓝方：电脑 AI（' + DIFFS[aiLevel].label + '）'
+  const blueHint = humans[1]
+    ? '蓝方 ' + humans[1].name + '：↑↓←→ 走位  K 普攻  ' + humanSkillHint(humans[1])
+    : aiLevel ? '蓝方：电脑 AI（' + DIFFS[aiLevel].label + '）'
     : net.active ? '蓝方：玩家联机'
-    : '蓝方：↑↓←→ 走位  K 普攻  L 火球  J 新星', W - 56, H - 26);
+    : '蓝方：↑↓←→ 走位  K 普攻';
+  ctx.fillText(blueHint, W - 56, H - 26);
   ctx.textAlign = 'center';
   ctx.fillText((net.active ? '' : 'R 重开   ') + 'P 暂停   M 静音' + (muted ? '（已静音）' : ''), W / 2, H - 12);
   ctx.textBaseline = 'alphabetic';
@@ -2755,7 +2968,7 @@ function drawMenu() {
     ctx.fillStyle = team[0].color;
     ctx.fillText(side === TEAM_RED ? '红方 · 5 人' : '蓝方 · 5 人', cx - 158, 246);
     const lines = side === TEAM_RED
-      ? ['本机操控 0 号（烈焰剑客）', 'WASD 走位  F 普攻', 'G 冲刺 · H 旋风']
+      ? ['本机操控 0 号 · ' + HEROES[selHero[0]].name, 'WASD 走位  F 普攻', '开局可自由选择英雄']
       : ['其余 4 名由 AI 自动参战', '每回合团灭或积分定胜负', '击倒后 5 秒复活'];
     ctx.font = '16px "PingFang SC","Microsoft YaHei",sans-serif';
     lines.forEach((ln, i) => {
@@ -2797,7 +3010,97 @@ function drawMenu() {
   const a = 0.5 + 0.5 * Math.sin(time * 0.08);
   ctx.font = 'bold 26px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,' + (0.45 + a * 0.55) + ')';
-  ctx.fillText('按  Enter  开始对战', W / 2, 682);
+  ctx.fillText('按  Enter  选择英雄并开始', W / 2, 682);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawHeroSelect() {
+  ctx.fillStyle = 'rgba(5,7,16,0.82)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+  const red = heroSelectPhase === 0;
+  const sideColor = red ? '#ff6b6b' : '#5b8cff';
+  const sideName = red ? '红 方' : '蓝 方';
+  const keys = red ? SCHEME_A.skillKeys : SCHEME_B.skillKeys;
+  const confirmKey = red ? 'F / Enter' : 'K / 空格';
+
+  ctx.font = 'bold 60px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.lineWidth = 12; ctx.strokeStyle = 'rgba(0,0,0,.6)';
+  ctx.strokeText('选 择 英 雄', W / 2, 84);
+  const hg = ctx.createLinearGradient(0, 54, 0, 114);
+  hg.addColorStop(0, '#ffffff'); hg.addColorStop(1, '#ffd166');
+  ctx.fillStyle = hg; ctx.fillText('选 择 英 雄', W / 2, 84);
+
+  ctx.font = 'bold 26px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = sideColor;
+  ctx.fillText(sideName + '玩家请选择出战英雄' + (heroPhaseTotal > 1 ? '（' + (heroSelectPhase + 1) + '/' + heroPhaseTotal + '）' : ''), W / 2, 138);
+
+  const cols = 3, cw = 360, ch = 200, gapX = 26, gapY = 24;
+  const totalW = cols * cw + (cols - 1) * gapX;
+  const x0 = (W - totalW) / 2, y0 = 176;
+  for (let i = 0; i < HEROES.length; i++) {
+    const h = HEROES[i];
+    const sel = i === heroIndex;
+    const cx = x0 + (i % cols) * (cw + gapX);
+    const cy = y0 + Math.floor(i / cols) * (ch + gapY);
+    const mid = cx + cw / 2;
+    ctx.save();
+    if (sel) { ctx.translate(mid, cy + ch / 2); ctx.scale(1.045, 1.045); ctx.translate(-mid, -(cy + ch / 2)); }
+    const bg = ctx.createLinearGradient(0, cy, 0, cy + ch);
+    bg.addColorStop(0, sel ? 'rgba(38,44,78,0.98)' : 'rgba(18,22,42,0.94)');
+    bg.addColorStop(1, 'rgba(10,13,28,0.98)');
+    ctx.fillStyle = bg;
+    roundRect(cx, cy, cw, ch, 14); ctx.fill();
+    if (sel) {
+      ctx.save(); ctx.shadowColor = h.color; ctx.shadowBlur = 30;
+      ctx.strokeStyle = h.color; ctx.lineWidth = 3;
+      roundRect(cx, cy, cw, ch, 14); ctx.stroke();
+      ctx.restore();
+    } else {
+      ctx.strokeStyle = 'rgba(120,150,210,0.35)'; ctx.lineWidth = 2;
+      roundRect(cx, cy, cw, ch, 14); ctx.stroke();
+    }
+    // 英雄色标
+    ctx.fillStyle = h.color;
+    roundRect(cx + 18, cy + 18, 14, 46, 6); ctx.fill();
+    // 名字 / 定位
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 28px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = sel ? '#ffffff' : 'rgba(225,235,255,0.9)';
+    ctx.fillText(h.name, cx + 44, cy + 34);
+    ctx.font = '16px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = h.color;
+    ctx.fillText(h.tag, cx + 44, cy + 60);
+    // 两个技能
+    const ids = HEROES[i].skills;
+    for (let k = 0; k < ids.length; k++) {
+      const sk = SKILL_DEF[ids[k]];
+      const ky = cy + 88 + k * 34;
+      ctx.fillStyle = 'rgba(255,209,102,0.16)';
+      roundRect(cx + 18, ky - 12, cw - 36, 28, 7); ctx.fill();
+      ctx.font = 'bold 16px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = '#ffd166';
+      ctx.fillText('[' + (keys[k] || sk.key).replace('Key', '') + ']', cx + 28, ky + 2);
+      ctx.font = '16px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = 'rgba(225,235,255,0.92)';
+      ctx.fillText(sk.label, cx + 74, ky + 2);
+      ctx.fillStyle = 'rgba(160,180,220,0.7)';
+      ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillText('CD ' + (sk.cd / 60).toFixed(1) + 's', cx + cw - 78, ky + 2);
+    }
+    ctx.textAlign = 'center';
+    ctx.restore();
+  }
+
+  ctx.textAlign = 'center';
+  ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(160,180,220,0.7)';
+  ctx.fillText('W A S D / 方向键 或 数字键 1-6 切换    ·    Esc 返回主菜单', W / 2, H - 58);
+  const a = 0.5 + 0.5 * Math.sin(time * 0.08);
+  ctx.font = 'bold 24px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,' + (0.45 + a * 0.55) + ')';
+  ctx.fillText(sideName + '按 ' + confirmKey + ' 确认', W / 2, H - 24);
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -3057,6 +3360,7 @@ function render() {
   if (use2D) draw2DScene(); else renderer.render(scene, camera);
 
   if (gameState === 'menu') { drawMenu(); return; }
+  if (gameState === 'heroselect') { drawHeroSelect(); return; }
   if (gameState === 'netlobby') return;   // 联机大厅由 DOM 覆盖层呈现
   drawHUD();
   drawFloaters();
