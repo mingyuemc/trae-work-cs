@@ -99,9 +99,11 @@ fit();
 // ================= 输入 =================
 const keys = Object.create(null);
 const pressed = Object.create(null);
-const BLOCK = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space']);
+let rebind = null;   // 键位设置：等待玩家按下的新按键（{ scheme, index }）
+const BLOCK = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'Tab']);
 addEventListener('keydown', e => {
   if (BLOCK.has(e.code)) e.preventDefault();
+  if (rebind) { e.preventDefault(); finishRebind(e.code); return; }   // 捕获重绑定按键
   if (!keys[e.code]) pressed[e.code] = true;
   keys[e.code] = true;
   initAudio();
@@ -831,8 +833,9 @@ class EnemyAI {
 }
 
 // ================= 队伍与目标辅助 =================
-function alliesOf(f) { return f.side === TEAM_RED ? redTeam : blueTeam; }
-function enemiesOf(f) { return f.side === TEAM_RED ? blueTeam : redTeam; }
+// 1v1 模式下每队仅 0 号参战，其余角色 bench（场下待命，不参与判定 / 绘制）
+function alliesOf(f) { return (f.side === TEAM_RED ? redTeam : blueTeam).filter(x => !x.bench); }
+function enemiesOf(f) { return (f.side === TEAM_RED ? blueTeam : redTeam).filter(x => !x.bench); }
 function nearestEnemy(f) {
   const list = enemiesOf(f);
   let best = null, bd = 1e9;
@@ -843,7 +846,7 @@ function nearestEnemy(f) {
   }
   return best;
 }
-function teamAlive(side) { const t = side === TEAM_RED ? redTeam : blueTeam; return t.some(f => !f.dead); }
+function teamAlive(side) { const t = side === TEAM_RED ? redTeam : blueTeam; return t.some(f => !f.dead && !f.bench); }
 
 // ================= 技能与连招表 =================
 // 技能池：每名英雄从中挑选 2 个（key 为默认按键，实际按键由操控方案 skillKeys 决定）
@@ -1158,13 +1161,15 @@ class Fighter {
     this.dead = false; this.respawnT = 0;
     this.opp = null; this.aiTarget = null;
     this.kills = 0;
-    this.model.visible = true;
+    this.bench = this.slot >= matchTeamSize;      // 1v1 时非 0 号角色场下待命
+    this.model.visible = !this.bench;
     this.aimMesh.visible = false;
     this.model.position.set(this.x, 0, this.z);
     this.model.rotation.set(0, this.angle, 0);
   }
 
   update() {
+    if (this.bench) return;                // 场下待命：不参与模拟
     if (this.flash > 0) this.flash--;
     if (this.dead) {                       // 阵亡：等待复活
       if (this.respawnT > 0) { this.respawnT--; if (this.respawnT === 0) this.respawn(); }
@@ -1466,6 +1471,7 @@ class Fighter {
 
   // 每帧姿态更新（3D 表现）
   pose() {
+    if (this.bench) return;
     const g = this.model, P = this.parts;
     const walking = Math.hypot(this.vx, this.vz) > 0.6 && this.y <= 0.01 && this.attackT <= 0 && this.dashT <= 0;
     const bob = walking ? Math.abs(Math.sin(this.walkPhase)) * 3 : 0;
@@ -1607,10 +1613,14 @@ const NET_ICE = { iceServers: [
   { urls: 'stun:stun1.l.google.com:19302' }
 ] };
 
-// 星型拓扑：主机 + 最多 3 个客户端（合计 4 名真人），其余位置 AI 补位。
-// 主机操控红方 0 号，客户端依次操控蓝方 0 / 1 / 2 号，全部接收同一份权威快照。
-const MAX_CLIENTS = 3;
-const CLIENT_SLOTS = [5, 6, 7];   // fighters 中客户端占用的下标（蓝方 0/1/2）
+// 星型拓扑：主机 + 若干客户端，其余位置 AI 补位。
+// 5v5：主机 + 最多 3 名客户端；1v1：主机 + 最多 1 名客户端。全部接收同一份权威快照。
+let MAX_CLIENTS = 3;
+let CLIENT_SLOTS = [5, 6, 7];     // fighters 中客户端占用的下标（蓝方 0/1/2）
+function setNetMode(teamSize) {   // 依据联机模式设置真人上限
+  if (teamSize === 1) { MAX_CLIENTS = 1; CLIENT_SLOTS = [5]; }
+  else { MAX_CLIENTS = 3; CLIENT_SLOTS = [5, 6, 7]; }
+}
 
 const net = {
   role: null, active: false, connected: false,
@@ -1686,7 +1696,7 @@ function applyFighterState(f, a) {
   f.chainStep = a[20]; f.chainT = a[21]; f.combo = a[22]; f.comboT = a[23]; f.flash = a[24];
   f.walkPhase = a[25];
   f.dead = !!a[26]; f.respawnT = a[27] || 0;
-  f.model.visible = !f.dead;
+  f.model.visible = !f.dead && !f.bench;
   f.model.position.set(f.x, f.y, f.z);
   f.model.rotation.set(0, f.angle, 0);
 }
@@ -1730,6 +1740,10 @@ function applySnapshot(s) {
   roundTime = s.rt;
   roundResult = (s.pr === undefined ? null : s.pr);
   paused = !!s.pa;
+  if (s.tsz) {                        // 同步本局参战人数（1v1 / 5v5），据此设置场下角色
+    matchTeamSize = s.tsz;
+    for (const f of fighters) f.bench = f.slot >= matchTeamSize;
+  }
   if (s.hero) {                       // 同步主机所选英雄的外观 / 技能
     for (let side = 0; side < 2; side++) {
       const f = side === 0 ? redTeam[0] : blueTeam[0];
@@ -1770,6 +1784,7 @@ function netHostSend() {
     pr: (roundResult === null ? null : roundResult), pa: paused,
     f: fighters.map(fighterState),
     pj: projectiles.map(p => [p.__id, Math.round(p.x), Math.round(p.y), Math.round(p.z), p.type, p.color, p.r]),
+    tsz: matchTeamSize,
     hero: [redTeam[0].heroId || null, blueTeam[0].heroId || null],
     ev: net.events
   };
@@ -1809,7 +1824,8 @@ function netGuestStep() {
       net.sendTo(peer, {
         t: 'i', slot: net.mySlot, seq: net.inputSeq, d: {
           up: !!(c && keys[c.up]), down: !!(c && keys[c.down]), left: !!(c && keys[c.left]), right: !!(c && keys[c.right]),
-          attack: c ? consume(c.attack) : false, skills: me.skills.map(s => consume(s.key))
+          attack: c ? consume(c.attack) : false,
+          skills: me.skills.map((s, i) => consume((c && c.skillKeys && c.skillKeys[i]) || s.key))
         }
       });
     }
@@ -1917,6 +1933,7 @@ function netDropPeer(peer, msg) {
 function startNetMatch() {
   net.active = true;
   aiLevel = null;
+  matchTeamSize = netTeamSize;             // 1v1 只上 0 号，5v5 全队上场
   for (const f of fighters) { f.ai = null; f.netRemote = false; f.netPeer = null; f.controls = null; f.dmgMul = 1; }
   humans.length = 0;
   teamState[0].hasHuman = false; teamState[0].remote = false;
@@ -1954,7 +1971,7 @@ async function netStartHost() {
   netShowHostRoom();
 }
 async function netAddHostPeer() {
-  if (net.peers.length >= MAX_CLIENTS) return netMsg('已达到最大真人数量（4 人）');
+  if (net.peers.length >= MAX_CLIENTS) return netMsg('已达到最大真人数量（' + (MAX_CLIENTS + 1) + ' 人）');
   const slot = CLIENT_SLOTS[net.peers.length];
   const peer = newPeer(slot);
   peer.edges = newPeerEdges(peer.fighter);
@@ -2012,6 +2029,8 @@ function netEnd(msg) {
 // ---- 联机大厅 UI ----
 function openNetLobby() {
   gameState = 'netlobby'; stateT = 0; currentMode = menuIndex;
+  netTeamSize = modeTeamSize(MENU[menuIndex].id);   // 1v1 或 5v5
+  setNetMode(netTeamSize);
   net.role = null; net.active = false; net.connected = false; net.latestSnap = null;
   clearPressed();
   netShowChoose();
@@ -2028,11 +2047,13 @@ function netCopy(id, ok) {
   netMsg(done ? ok : '自动复制失败，请手动全选复制');
 }
 function netShowChoose() {
+  const sel = netTeamSize === 1
+    ? '<p><b>1v1 模式</b>：主机 + 最多 <b>1 名客户端</b>。主机操控红方 0 号，客户端操控蓝方 0 号。</p>'
+    : '<p><b>5v5 模式</b>：最多 <b>4 名真人</b>（主机 + 3 名客户端）：主机操控红方 0 号，<br>客户端依次操控蓝方 0 / 1 / 2 号，其余位置由 AI 补位。</p>';
   netUI(`<h2>联机对战 · P2P</h2>
     <p>无需服务器：一方创建房间，其余玩家依次加入。<br>
        每名玩家复制 / 粘贴 <b>一次连接码</b> 建立直连，之后为点对点联机。</p>
-    <p>最多 <b>4 名真人</b>（主机 + 3 名客户端）：主机操控红方 0 号，<br>
-       客户端依次操控蓝方 0 / 1 / 2 号，其余位置由 AI 补位。</p>
+    ${sel}
     <div class="row">
       <button class="pri" id="nbHost">创建房间（我是主机）</button>
       <button id="nbJoin">加入房间（我是客户端）</button>
@@ -2044,11 +2065,13 @@ function netShowChoose() {
     netui.querySelector('#nbBack').onclick = () => { net.role = null; gameState = 'menu'; stateT = 0; netHide(); };
   });
 }
-// 主机房间面板：可逐个接入最多 3 名客户端，再统一开始 5v5 对战
+// 主机房间面板：按模式逐个接入客户端（1v1 限 1 名 / 5v5 限 3 名），再统一开始对战
 function netShowHostRoom(code, num) {
   const connected = net.peers.length;
-  let html = '<h2>联机房间 · 主机</h2>';
-  html += '<p>已连接客户端：<b>' + connected + ' / ' + MAX_CLIENTS + '</b>　主机操控红方 0 号，客户端操控蓝方 0 / 1 / 2 号。</p>';
+  const ver = netTeamSize === 1 ? '1v1' : '5v5';
+  let html = '<h2>联机房间 · 主机（' + ver + '）</h2>';
+  html += '<p>已连接客户端：<b>' + connected + ' / ' + MAX_CLIENTS + '</b>　主机操控红方 0 号'
+    + (netTeamSize === 1 ? '，客户端操控蓝方 0 号。' : '，客户端操控蓝方 0 / 1 / 2 号。') + '</p>';
   if (code) {
     html += '<p>1. 复制下面的 <b>连接码</b>，发给第 ' + num + ' 位玩家。<br>2. 对方回传 <b>应答码</b> 后，粘贴到下方并点「连接」。</p>';
     html += '<textarea id="nbOffer" readonly>' + code + '</textarea>';
@@ -2059,7 +2082,7 @@ function netShowHostRoom(code, num) {
   } else {
     html += '<div class="row"><button class="pri" id="nbAdd">' + (connected ? '再添加一名玩家' : '生成连接码') + '</button></div>';
   }
-  html += '<div class="row"><button class="pri" id="nbStart">开始 5v5 对战</button><button id="nbQuit">解散房间</button></div>';
+  html += '<div class="row"><button class="pri" id="nbStart">开始 ' + ver + ' 对战</button><button id="nbQuit">解散房间</button></div>';
   html += '<p id="netMsg"></p>';
   netUI(html, () => {
     const q = id => netui.querySelector(id);
@@ -2119,19 +2142,81 @@ let upgradePhase = 0, upgradeSel = 0, upgradeChoices = [[], []];
 const TOTAL_ROUND_TIME = 75 * 60;
 
 const MENU = [
-  { id: 'pvp',    label: '双人对战',   desc: '5v5 · 两名玩家同屏，各带 5 人' },
-  { id: 'p2p',    label: '联机对战',   desc: '5v5 · P2P 直连（最多 4 名真人）' },
+  { id: 'solo',   label: '单人 1v1',    desc: '1v1 · 单机对战电脑（普通难度）' },
   { id: 'easy',   label: '人机 · 简单', desc: '5v5 · 电脑反应慢、会失误' },
   { id: 'normal', label: '人机 · 普通', desc: '5v5 · 电脑会走位与闪避' },
-  { id: 'hard',   label: '人机 · 困难', desc: '5v5 · 电脑反应快、抓破绽' }
+  { id: 'hard',   label: '人机 · 困难', desc: '5v5 · 电脑反应快、抓破绽' },
+  { id: 'pvp',    label: '双人对战',    desc: '5v5 · 两名玩家同屏，各带 5 人' },
+  { id: 'p2p',    label: '联机 5v5',    desc: '5v5 · P2P 直连（最多 4 名真人）' },
+  { id: 'p2p1',   label: '联机 1v1',    desc: '1v1 · P2P 直连（主机 vs 客户端）' },
+  { id: 'keys',   label: '设置键位',    desc: '自定义红 / 蓝方操作按键' }
 ];
 let menuIndex = 0;
 let currentMode = 0;
 let aiLevel = null;
+let matchTeamSize = TEAM_SIZE;                 // 本局每队参战人数（1 = 1v1 / 5 = 5v5）
+let netTeamSize = TEAM_SIZE;                    // 联机大厅对应的每队参战人数
+const modeTeamSize = id => (id === 'solo' || id === 'p2p1') ? 1 : TEAM_SIZE;
 
-// ---- 同屏真人控制方案 ----
-const SCHEME_A = { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', attack: 'KeyF', skillKeys: ['KeyG', 'KeyH'] };                       // 红方主控
-const SCHEME_B = { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', attack: 'KeyK', skillKeys: ['KeyL', 'KeyJ'] };   // 蓝方副控
+// ---- 同屏真人控制方案（默认值 + 支持自定义 / 本地保存） ----
+const SCHEME_A_DEF = { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', attack: 'KeyF', skillKeys: ['KeyG', 'KeyH'] };                       // 红方主控
+const SCHEME_B_DEF = { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', attack: 'KeyK', skillKeys: ['KeyL', 'KeyJ'] };   // 蓝方副控
+const SCHEME_A = { up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', attack: 'KeyF', skillKeys: ['KeyG', 'KeyH'] };
+const SCHEME_B = { up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', attack: 'KeyK', skillKeys: ['KeyL', 'KeyJ'] };
+// 键位设置：可重绑定的操作项（顺序即界面行序）
+const KEY_ACTIONS = [
+  { k: 'up', label: '上' }, { k: 'down', label: '下' }, { k: 'left', label: '左' }, { k: 'right', label: '右' },
+  { k: 'attack', label: '普攻' }, { k: 'skill0', label: '技能 1' }, { k: 'skill1', label: '技能 2' }
+];
+let keycfgScheme = 0, keycfgIndex = 0;
+function schemeOf(s) { return s === 0 ? SCHEME_A : SCHEME_B; }
+function schemeDef(s) { return s === 0 ? SCHEME_A_DEF : SCHEME_B_DEF; }
+function isSkillKey(k) { return k === 'skill0' || k === 'skill1'; }
+const ARROW_LABEL = { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' };
+function keyLabel(code) {                     // 把 KeyCode 转为易读键名
+  if (!code) return '?';
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code.startsWith('Numpad')) return '小键盘' + code.slice(6);
+  if (code.startsWith('Arrow')) return ARROW_LABEL[code] || code;
+  if (code === 'Space') return '空格';
+  if (code === 'ShiftLeft' || code === 'ShiftRight') return 'Shift';
+  if (code === 'ControlLeft' || code === 'ControlRight') return 'Ctrl';
+  if (code === 'AltLeft' || code === 'AltRight') return 'Alt';
+  return code;
+}
+function schemeHint(sc) {                      // 生成 "WASD 走位  F 普攻" 形式的操作提示
+  return keyLabel(sc.up) + keyLabel(sc.left) + keyLabel(sc.down) + keyLabel(sc.right) + ' 走位  ' + keyLabel(sc.attack) + ' 普攻';
+}
+function getBinding(sc, a) { return isSkillKey(a.k) ? sc.skillKeys[a.k === 'skill1' ? 1 : 0] : sc[a.k]; }
+function setBinding(sc, a, code) { if (isSkillKey(a.k)) sc.skillKeys[a.k === 'skill1' ? 1 : 0] = code; else sc[a.k] = code; }
+const KEY_STORE = 'moba_keys_v1';
+function loadKeys() {
+  try {
+    const s = JSON.parse(localStorage.getItem(KEY_STORE));
+    if (!s) return;
+    for (const pair of [[SCHEME_A, s.A], [SCHEME_B, s.B]]) {
+      const sc = pair[0], o = pair[1];
+      if (!o) continue;
+      for (const k of ['up', 'down', 'left', 'right', 'attack']) if (o[k]) sc[k] = o[k];
+      if (Array.isArray(o.skillKeys)) for (let i = 0; i < 2; i++) if (o.skillKeys[i]) sc.skillKeys[i] = o.skillKeys[i];
+    }
+  } catch (e) { }
+}
+function saveKeys() {
+  try {
+    const dump = sc => ({ up: sc.up, down: sc.down, left: sc.left, right: sc.right, attack: sc.attack, skillKeys: sc.skillKeys.slice() });
+    localStorage.setItem(KEY_STORE, JSON.stringify({ A: dump(SCHEME_A), B: dump(SCHEME_B) }));
+  } catch (e) { }
+}
+// 捕获到新按键：写入当前操控方案并持久化（Esc 取消）
+function finishRebind(code) {
+  const rb = rebind; rebind = null;
+  if (!rb) return;
+  if (code === 'Escape') { SFX.nav(); return; }   // Esc 取消本次重绑定
+  setBinding(schemeOf(rb.scheme), KEY_ACTIONS[rb.index], code);
+  saveKeys(); SFX.ready();
+}
 
 // ---- 队伍状态（技能强化按队共享） ----
 const teamState = [
@@ -2232,7 +2317,8 @@ function startMatch(modeIdx) {
   if (modeIdx === undefined) modeIdx = currentMode;
   currentMode = modeIdx;
   const modeId = MENU[modeIdx].id;
-  aiLevel = (modeId === 'pvp' || modeId === 'p2p') ? null : modeId;
+  matchTeamSize = modeTeamSize(modeId);      // 1v1 只上 0 号，5v5 全队上场
+  aiLevel = (modeId === 'pvp' || modeId === 'p2p' || modeId === 'p2p1') ? null : (modeId === 'solo' ? 'normal' : modeId);
   net.active = false;
 
   humans.length = 0;
@@ -2246,13 +2332,16 @@ function startMatch(modeIdx) {
   // 红方 0 号始终由本机操控
   const h1 = redTeam[0]; h1.controls = SCHEME_A; humans.push(h1); teamState[0].hasHuman = true;
   h1.applyHero(HEROES[selHero[0]]);
-  // 同屏双人：蓝方 0 号由本机第二位玩家操控
+  // 同屏双人：蓝方 0 号由本机第二位玩家操控；1v1 / 人机：蓝方 0 号交给 AI（选用英雄）
+  const h2 = blueTeam[0];
   if (modeId === 'pvp') {
-    const h2 = blueTeam[0]; h2.controls = SCHEME_B; humans.push(h2); teamState[1].hasHuman = true;
+    h2.controls = SCHEME_B; humans.push(h2); teamState[1].hasHuman = true;
+    h2.applyHero(HEROES[selHero[1]]);
+  } else if (matchTeamSize === 1) {
     h2.applyHero(HEROES[selHero[1]]);
   }
   const aiLv = aiLevel || 'normal';
-  for (const f of fighters) if (humans.indexOf(f) < 0) f.ai = new EnemyAI(aiLv);
+  for (const f of fighters) if (!f.bench && humans.indexOf(f) < 0) f.ai = new EnemyAI(aiLv);
   for (const f of fighters) { f.dmgMul = aiLevel ? DIFFS[aiLv].dmg : 1; f.resetMods(); }
   for (const f of humans) f.dmgMul = 1;      // 真人角色不受难度加成影响
 
@@ -2297,10 +2386,10 @@ function resolveObstacleCollision(f) {
 function resolveBodyCollision() {
   for (let i = 0; i < fighters.length; i++) {
     const a = fighters[i];
-    if (a.dead) continue;
+    if (a.dead || a.bench) continue;
     for (let j = i + 1; j < fighters.length; j++) {
       const b = fighters[j];
-      if (b.dead) continue;
+      if (b.dead || b.bench) continue;
       if (Math.abs(a.y - b.y) > 130) continue;
       const dx = b.x - a.x, dz = b.z - a.z;
       const d = Math.hypot(dx, dz);
@@ -2312,7 +2401,7 @@ function resolveBodyCollision() {
     }
   }
   for (const f of fighters) {
-    if (f.dead) continue;
+    if (f.dead || f.bench) continue;
     f.x = clamp(f.x, -ARENA_HX, ARENA_HX); f.z = clamp(f.z, -ARENA_HZ, ARENA_HZ);
     resolveObstacleCollision(f);
   }
@@ -2363,14 +2452,37 @@ function simulate() {
     for (let i = 0; i < MENU.length; i++) if (consume('Digit' + (i + 1)) || consume('Numpad' + (i + 1))) menuIndex = i;
     if (menuIndex !== before) SFX.nav();
     if (consume('Enter') || consume('Space')) {
-      // 先进入选人：同屏双人需要红蓝双方各选一次，联机仅主机选
-      pendingMode = menuIndex;
-      heroPhaseTotal = MENU[menuIndex].id === 'pvp' ? 2 : 1;
-      heroSelectPhase = 0;
-      heroIndex = selHero[0];
-      gameState = 'heroselect'; stateT = 0;
-      SFX.go();
+      if (MENU[menuIndex].id === 'keys') {
+        // 打开键位设置
+        gameState = 'keyconfig'; stateT = 0; keycfgScheme = 0; keycfgIndex = 0; rebind = null;
+        SFX.go();
+      } else {
+        // 先进入选人：同屏双人需要红蓝双方各选一次，其余模式仅红方选
+        pendingMode = menuIndex;
+        heroPhaseTotal = MENU[menuIndex].id === 'pvp' ? 2 : 1;
+        heroSelectPhase = 0;
+        heroIndex = selHero[0];
+        gameState = 'heroselect'; stateT = 0;
+        SFX.go();
+      }
     }
+    clearPressed(); return;
+  }
+  if (gameState === 'keyconfig') {
+    stateT++;
+    if (rebind) { clearPressed(); return; }        // 正在等待玩家按键
+    const before = keycfgIndex;
+    if (consume('ArrowUp') || consume('KeyW')) keycfgIndex = (keycfgIndex + KEY_ACTIONS.length - 1) % KEY_ACTIONS.length;
+    if (consume('ArrowDown') || consume('KeyS')) keycfgIndex = (keycfgIndex + 1) % KEY_ACTIONS.length;
+    if (keycfgIndex !== before) SFX.nav();
+    if (consume('ArrowLeft') || consume('ArrowRight') || consume('Tab')) { keycfgScheme = keycfgScheme ? 0 : 1; SFX.nav(); }
+    if (consume('KeyZ')) {                          // 恢复当前方案默认键位
+      const sc = schemeOf(keycfgScheme), d = schemeDef(keycfgScheme);
+      sc.up = d.up; sc.down = d.down; sc.left = d.left; sc.right = d.right; sc.attack = d.attack;
+      sc.skillKeys = d.skillKeys.slice(); saveKeys(); SFX.ready();
+    }
+    if (consume('Enter') || consume('Space')) { rebind = { scheme: keycfgScheme, index: keycfgIndex }; SFX.ready(); }
+    if (consume('Escape')) { gameState = 'menu'; stateT = 0; menuIndex = MENU.length - 1; }
     clearPressed(); return;
   }
   if (gameState === 'heroselect') {
@@ -2383,10 +2495,10 @@ function simulate() {
     for (let i = 0; i < HEROES.length; i++)
       if (consume('Digit' + (i + 1)) || consume('Numpad' + (i + 1))) heroIndex = i;
     if (heroIndex !== before) SFX.nav();
-    // 确认键：红方 F / Enter，蓝方 K / 空格
+    // 确认键：红方用红方普攻键 / Enter，蓝方用蓝方普攻键 / 空格
     const confirm = heroSelectPhase === 0
-      ? (consume('KeyF') || consume('Enter'))
-      : (consume('KeyK') || consume('Space'));
+      ? (consume(SCHEME_A.attack) || consume('Enter'))
+      : (consume(SCHEME_B.attack) || consume('Space'));
     const back = consume('Escape');
     if (back) { gameState = 'menu'; stateT = 0; clearPressed(); return; }
     if (confirm) {
@@ -2394,7 +2506,8 @@ function simulate() {
       SFX.ready();
       heroSelectPhase++;
       if (heroSelectPhase >= heroPhaseTotal) {
-        if (MENU[pendingMode].id === 'p2p') openNetLobby();
+        const mid = MENU[pendingMode].id;
+        if (mid === 'p2p' || mid === 'p2p1') openNetLobby();
         else startMatch(pendingMode);
       } else {
         heroIndex = selHero[heroSelectPhase];
@@ -2428,9 +2541,10 @@ function simulate() {
       // 全 AI 一方：随机挑选一张
       if (stateT >= 50) { upgradeSel = Math.floor(Math.random() * cards.length); commitUpgrade(); }
     } else {
-      const prev = consume(upgradePhase === 0 ? 'KeyA' : 'ArrowLeft');
-      const next = consume(upgradePhase === 0 ? 'KeyD' : 'ArrowRight');
-      const ok = upgradePhase === 0 ? (consume('KeyF') || consume('Enter')) : (consume('KeyK') || consume('Space'));
+      const sc = upgradePhase === 0 ? SCHEME_A : SCHEME_B;
+      const prev = consume(sc.left);
+      const next = consume(sc.right);
+      const ok = consume(sc.attack) || consume('Enter') || consume('Space');
       if (prev) { upgradeSel = (upgradeSel + cards.length - 1) % cards.length; SFX.nav(); }
       if (next) { upgradeSel = (upgradeSel + 1) % cards.length; SFX.nav(); }
       if (ok) commitUpgrade();
@@ -2514,11 +2628,11 @@ function updateCamera() {
 }
 
 // ================= HUD 绘制（2D 覆盖层） =================
-// 队伍面板：显示该队 5 名英雄的生命 / 阵亡状态 / 击杀数 / 胜场
+// 队伍面板：显示该队参战英雄的生命 / 阵亡状态 / 击杀数 / 胜场（1v1 时仅 1 行）
 function drawTeamPanel(side, left) {
   const team = side === TEAM_RED ? redTeam : blueTeam;
   const pw = 300, rowH = 30, headH = 42;
-  const ph = headH + TEAM_SIZE * rowH + 6;
+  const ph = headH + matchTeamSize * rowH + 6;
   const x0 = left ? 28 : W - 28 - pw, y0 = 20;
   const col = side === TEAM_RED ? '#ff5a5f' : '#4fa8ff';
 
@@ -2546,7 +2660,7 @@ function drawTeamPanel(side, left) {
     else { ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.5; ctx.stroke(); }
   }
 
-  for (let i = 0; i < TEAM_SIZE; i++) {
+  for (let i = 0; i < matchTeamSize; i++) {
     const f = team[i];
     const ry = y0 + headH + i * rowH;
     const bx = x0 + 12, bw = pw - 24, bh = 9;
@@ -2577,7 +2691,7 @@ function humanSkillHint(f) {
   if (!f || !f.skills) return '';
   return f.skills.map((s, i) => {
     const k = (f.controls && f.controls.skillKeys && f.controls.skillKeys[i]) || s.key;
-    return k.replace('Key', '') + ' ' + s.label;
+    return keyLabel(k) + ' ' + s.label;
   }).join('  ');
 }
 
@@ -2603,7 +2717,7 @@ function drawSkillBar(f, align) {
     ctx.font = 'bold 11px "PingFang SC",sans-serif';
     ctx.fillStyle = 'rgba(200,215,245,0.6)';
     const dispKey = (f.controls && f.controls.skillKeys && f.controls.skillKeys[i]) || sk.key;
-    ctx.fillText(dispKey.replace('Key', ''), ix + iw / 2, iy + ih - 11);
+    ctx.fillText(keyLabel(dispKey), ix + iw / 2, iy + ih - 11);
     if (!ready) {
       ctx.fillStyle = 'rgba(10,14,30,0.7)';
       roundRect(ix, iy, iw, ih * ratio, 8); ctx.fill();
@@ -2640,7 +2754,7 @@ function drawFloaters() {
 // 英雄头顶血条 + 连击称号
 function drawOverhead() {
   for (const f of fighters) {
-    if (f.dead) continue;
+    if (f.dead || f.bench) continue;
     const sp = project(f.x, f.y + 205, f.z);
     if (sp.z <= 1) {
       const ratio = clamp(f.hp / f.maxHp, 0, 1);
@@ -2701,9 +2815,9 @@ function drawMinimap() {
     ctx.fillRect(mx(o.x - o.hx), mz(o.z - o.hz), o.hx / ARENA_HX * mw, o.hz / ARENA_HZ * mh);
   }
 
-  // 十名英雄标记（圆点 + 朝向指示）
+  // 英雄标记（圆点 + 朝向指示；1v1 时仅显示参战角色）
   for (const f of fighters) {
-    if (f.dead) continue;
+    if (f.dead || f.bench) continue;
     const px = mx(f.x), pz = mz(f.z);
     ctx.strokeStyle = f.color; ctx.lineWidth = 1.6;
     ctx.beginPath(); ctx.moveTo(px, pz);
@@ -2752,17 +2866,20 @@ function drawHUD() {
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.font = '14px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(170,190,225,0.5)';
-  const redHint = humans[0]
-    ? '红方 ' + humans[0].name + '：WASD 走位  F 普攻  ' + humanSkillHint(humans[0])
+  const localH = humans[0];                  // 本机操控角色（联机客户端时可能是蓝方）
+  const localSide = localH ? (localH.side === TEAM_RED ? '红方 ' : '蓝方 ') : '';
+  const localHint = localH
+    ? localSide + localH.name + '：' + schemeHint(localH.controls || SCHEME_A) + '  ' + humanSkillHint(localH)
+    : '';
+  const leftHint = localH
+    ? (localH.side === TEAM_RED ? localHint : (aiLevel ? '红方：电脑 AI（' + DIFFS[aiLevel].label + '）' : net.active ? '红方：玩家联机' : '红方：' + schemeHint(SCHEME_A)))
     : '5v5 · 本机操控红方 0 号';
-  ctx.fillText(redHint, 56, H - 26);
+  ctx.fillText(leftHint, 56, H - 26);
   ctx.textAlign = 'right';
-  const blueHint = humans[1]
-    ? '蓝方 ' + humans[1].name + '：↑↓←→ 走位  K 普攻  ' + humanSkillHint(humans[1])
-    : aiLevel ? '蓝方：电脑 AI（' + DIFFS[aiLevel].label + '）'
-    : net.active ? '蓝方：玩家联机'
-    : '蓝方：↑↓←→ 走位  K 普攻';
-  ctx.fillText(blueHint, W - 56, H - 26);
+  const rightHint = localH
+    ? (localH.side === TEAM_BLUE ? localHint : (aiLevel ? '蓝方：电脑 AI（' + DIFFS[aiLevel].label + '）' : net.active ? '蓝方：玩家联机' : '蓝方：' + schemeHint(SCHEME_B)))
+    : (aiLevel ? '蓝方：电脑 AI（' + DIFFS[aiLevel].label + '）' : net.active ? '蓝方：玩家联机' : '蓝方：' + schemeHint(SCHEME_B));
+  ctx.fillText(rightHint, W - 56, H - 26);
   ctx.textAlign = 'center';
   ctx.fillText((net.active ? '' : 'R 重开   ') + 'P 暂停   M 静音' + (muted ? '（已静音）' : ''), W / 2, H - 12);
   ctx.textBaseline = 'alphabetic';
@@ -2892,9 +3009,10 @@ function drawUpgrade() {
 
   ctx.font = 'bold 20px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(200,215,255,0.7)';
+  const usc = upgradePhase === 0 ? SCHEME_A : SCHEME_B;
   const hint = waiting ? '等待联机玩家选卡…'
     : auto ? '电脑将随机选择一张'
-    : upgradePhase === 0 ? 'A / D 切换　　F 确认' : '← / → 切换　　K 确认';
+    : keyLabel(usc.left) + ' / ' + keyLabel(usc.right) + ' 切换　　' + keyLabel(usc.attack) + ' 确认';
   ctx.fillText(hint, W / 2, 196);
 
   const cw = 320, ch = 340, gap = 40;
@@ -2959,6 +3077,7 @@ function drawMenu() {
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
 
   const pulse = 0.5 + 0.5 * Math.sin(time * 0.04);
+  const cardSize = modeTeamSize(MENU[menuIndex].id);   // 当前高亮模式的每队参战人数
   ctx.save();
   ctx.translate(W / 2, 110);
   ctx.font = 'bold 92px "PingFang SC","Microsoft YaHei",sans-serif';
@@ -2971,7 +3090,7 @@ function drawMenu() {
 
   ctx.font = 'bold 22px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(180,205,255,' + (0.6 + pulse * 0.4) + ')';
-  ctx.fillText('3D  MOBA  ·  5 v 5  团 队 对 战', W / 2, 176);
+  ctx.fillText('3D  MOBA  ·  ' + cardSize + ' v ' + cardSize + '  团 队 对 战', W / 2, 176);
 
   const drawCard = (team, side, cx) => {
     ctx.save();
@@ -2982,10 +3101,12 @@ function drawMenu() {
     ctx.textAlign = 'left';
     ctx.font = 'bold 30px "PingFang SC","Microsoft YaHei",sans-serif';
     ctx.fillStyle = team[0].color;
-    ctx.fillText(side === TEAM_RED ? '红方 · 5 人' : '蓝方 · 5 人', cx - 158, 246);
+    ctx.fillText(side === TEAM_RED ? '红方 · ' + cardSize + ' 人' : '蓝方 · ' + cardSize + ' 人', cx - 158, 246);
     const lines = side === TEAM_RED
-      ? ['本机操控 0 号 · ' + HEROES[selHero[0]].name, 'WASD 走位  F 普攻', '开局可自由选择英雄']
-      : ['其余 4 名由 AI 自动参战', '每回合团灭或积分定胜负', '击倒后 5 秒复活'];
+      ? ['本机操控 0 号 · ' + HEROES[selHero[0]].name, schemeHint(SCHEME_A), '开局可自由选择英雄']
+      : (cardSize === 1
+        ? ['敌方 0 号由 AI 操控', '单挑对决 · 击倒定胜负', '击倒后 5 秒复活']
+        : ['其余 4 名由 AI 自动参战', '每回合团灭或积分定胜负', '击倒后 5 秒复活']);
     ctx.font = '16px "PingFang SC","Microsoft YaHei",sans-serif';
     lines.forEach((ln, i) => {
       ctx.fillStyle = i === 0 ? 'rgba(255,209,102,0.92)' : 'rgba(200,215,245,0.82)';
@@ -3039,7 +3160,7 @@ function drawHeroSelect() {
   const sideColor = red ? '#ff6b6b' : '#5b8cff';
   const sideName = red ? '红 方' : '蓝 方';
   const keys = red ? SCHEME_A.skillKeys : SCHEME_B.skillKeys;
-  const confirmKey = red ? 'F / Enter' : 'K / 空格';
+  const confirmKey = red ? keyLabel(SCHEME_A.attack) + ' / Enter' : keyLabel(SCHEME_B.attack) + ' / 空格';
 
   ctx.font = 'bold 60px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.lineWidth = 12; ctx.strokeStyle = 'rgba(0,0,0,.6)';
@@ -3097,7 +3218,7 @@ function drawHeroSelect() {
       roundRect(cx + 18, ky - 12, cw - 36, 28, 7); ctx.fill();
       ctx.font = 'bold 16px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = '#ffd166';
-      ctx.fillText('[' + (keys[k] || sk.key).replace('Key', '') + ']', cx + 28, ky + 2);
+      ctx.fillText('[' + keyLabel(keys[k] || sk.key) + ']', cx + 28, ky + 2);
       ctx.font = '16px "PingFang SC","Microsoft YaHei",sans-serif';
       ctx.fillStyle = 'rgba(225,235,255,0.92)';
       ctx.fillText(sk.label, cx + 74, ky + 2);
@@ -3117,6 +3238,93 @@ function drawHeroSelect() {
   ctx.font = 'bold 24px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,' + (0.45 + a * 0.55) + ')';
   ctx.fillText(sideName + '按 ' + confirmKey + ' 确认', W / 2, H - 24);
+  ctx.textBaseline = 'alphabetic';
+}
+
+// 键位设置界面：可分别配置红 / 蓝方（本机操控方案）的 7 个操作键
+function drawKeyConfig() {
+  ctx.fillStyle = 'rgba(5,7,16,0.9)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+  ctx.font = 'bold 58px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.lineWidth = 12; ctx.strokeStyle = 'rgba(0,0,0,.6)';
+  ctx.strokeText('键 位 设 置', W / 2, 74);
+  const hg = ctx.createLinearGradient(0, 46, 0, 102);
+  hg.addColorStop(0, '#ffffff'); hg.addColorStop(1, '#ffd166');
+  ctx.fillStyle = hg; ctx.fillText('键 位 设 置', W / 2, 74);
+
+  const sc = schemeOf(keycfgScheme);
+  const col = keycfgScheme === 0 ? '#ff5a5f' : '#4fa8ff';
+
+  // 方案切换标签
+  const tabs = [['红方（主控）', 0, '#ff5a5f'], ['蓝方（副控）', 1, '#4fa8ff']];
+  for (const [label, idx, c] of tabs) {
+    const tw = 260, th = 46, tx = W / 2 - 270 + idx * 280, ty = 122;
+    const on = idx === keycfgScheme;
+    ctx.fillStyle = on ? 'rgba(38,44,78,0.98)' : 'rgba(16,20,38,0.9)';
+    roundRect(tx, ty, tw, th, 10); ctx.fill();
+    ctx.strokeStyle = on ? c : 'rgba(120,150,210,0.35)'; ctx.lineWidth = on ? 3 : 2;
+    roundRect(tx, ty, tw, th, 10); ctx.stroke();
+    ctx.font = 'bold 21px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = on ? '#ffffff' : 'rgba(190,205,235,0.75)';
+    ctx.fillText(label, tx + tw / 2, ty + th / 2 + 1);
+  }
+
+  // 冲突检测：同一方案内重复绑定
+  const used = {};
+  for (const a of KEY_ACTIONS) { const k = getBinding(sc, a); used[k] = (used[k] || 0) + 1; }
+
+  const rowW = 660, rowH = 52, x0 = (W - rowW) / 2, y0 = 196;
+  for (let i = 0; i < KEY_ACTIONS.length; i++) {
+    const a = KEY_ACTIONS[i];
+    const code = getBinding(sc, a);
+    const sel = i === keycfgIndex;
+    const listening = sel && rebind;
+    const conflict = used[code] > 1;
+    const ry = y0 + i * (rowH + 6), mid = ry + rowH / 2;
+    ctx.save();
+    if (sel) { ctx.translate(W / 2, mid); ctx.scale(1.02, 1.02); ctx.translate(-W / 2, -mid); }
+    ctx.fillStyle = sel ? 'rgba(38,44,78,0.98)' : 'rgba(16,20,38,0.92)';
+    roundRect(x0, ry, rowW, rowH, 10); ctx.fill();
+    ctx.strokeStyle = listening ? '#ffd166' : sel ? col : 'rgba(120,150,210,0.30)';
+    ctx.lineWidth = sel ? 2.5 : 2;
+    roundRect(x0, ry, rowW, rowH, 10); ctx.stroke();
+    ctx.restore();
+
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 22px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = sel ? '#ffffff' : 'rgba(205,218,248,0.85)';
+    ctx.fillText(a.label, x0 + 26, mid + 1);
+
+    // 右侧按键卡
+    const kw = 190, kx = x0 + rowW - kw - 20, ky = ry + 8, kh = rowH - 16;
+    ctx.fillStyle = listening ? 'rgba(255,209,102,0.22)' : 'rgba(8,11,26,0.9)';
+    roundRect(kx, ky, kw, kh, 8); ctx.fill();
+    ctx.strokeStyle = listening ? '#ffd166' : conflict ? '#ff6b6b' : 'rgba(140,170,240,0.5)';
+    ctx.lineWidth = 2;
+    roundRect(kx, ky, kw, kh, 8); ctx.stroke();
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 20px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = listening ? '#ffd166' : conflict ? '#ff9a9a' : '#dfe7ff';
+    ctx.fillText(listening ? '按下新按键…' : keyLabel(code), kx + kw / 2, ky + kh / 2 + 1);
+    if (conflict && !listening) {
+      ctx.font = 'bold 12px "PingFang SC",sans-serif';
+      ctx.fillStyle = '#ff8a8a';
+      ctx.fillText('按键重复', kx + kw / 2, ry + rowH - 5);
+    }
+  }
+
+  ctx.textAlign = 'center';
+  ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(160,180,220,0.75)';
+  ctx.fillText('↑ / ↓ 选择操作　·　← / → 切换红 / 蓝方　·　Enter 修改按键　·　Z 恢复默认', W / 2, H - 62);
+  ctx.fillStyle = 'rgba(140,160,200,0.6)';
+  ctx.fillText('键位会自动保存在本机。红方键用于单机 / 联机本机操控，蓝方键用于同屏双人第二位玩家。', W / 2, H - 40);
+  const a2 = 0.5 + 0.5 * Math.sin(time * 0.08);
+  ctx.font = 'bold 22px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,' + (0.4 + a2 * 0.6) + ')';
+  ctx.fillText('按 Esc 返回主菜单', W / 2, H - 14);
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -3336,7 +3544,7 @@ function draw2DScene() {
   ctx.globalAlpha = 1;
 
   // 角色（后画的覆盖前面的：按 z 从远到近）
-  const order = fighters.filter(f => !f.dead).slice().sort((a, b) => a.z - b.z);
+  const order = fighters.filter(f => !f.dead && !f.bench).slice().sort((a, b) => a.z - b.z);
   for (const f of order) drawFighter2D(f);
 
   // 弹道
@@ -3377,6 +3585,7 @@ function render() {
 
   if (gameState === 'menu') { drawMenu(); return; }
   if (gameState === 'heroselect') { drawHeroSelect(); return; }
+  if (gameState === 'keyconfig') { drawKeyConfig(); return; }
   if (gameState === 'netlobby') return;   // 联机大厅由 DOM 覆盖层呈现
   drawHUD();
   drawFloaters();
@@ -3400,6 +3609,7 @@ function loop(now) {
   render();
   requestAnimationFrame(loop);
 }
+loadKeys();                 // 读取本地保存的自定义键位
 requestAnimationFrame(loop);
 
 })();
