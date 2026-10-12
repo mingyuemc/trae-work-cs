@@ -178,6 +178,19 @@ const SFX = {
   meteor() { tone(95, 0.55, 'sawtooth', 0.12, 38); noiseHit(0.38, 0.08, 600); },
   heal()   { tone(660, 0.32, 'sine', 0.06, 990); tone(990, 0.36, 'sine', 0.05, 1320); },
   shield() { tone(300, 0.36, 'triangle', 0.07, 880); noiseHit(0.22, 0.04, 2200); },
+  // ---- 英雄专属技能音效：每个可选英雄 2 条（1=首技能 / 2=次技能）----
+  blaze1()  { tone(900, 0.16, 'sawtooth', 0.07, 260); noiseHit(0.1, 0.04, 2200); },                       // 烈焰剑客 · 冲刺斩
+  blaze2()  { tone(540, 0.42, 'sawtooth', 0.08, 980); noiseHit(0.36, 0.05, 1700); },                      // 烈焰剑客 · 烈焰旋风
+  aegis1()  { tone(430, 0.18, 'square', 0.07, 190); noiseHit(0.12, 0.05, 1500); },                        // 苍穹剑士 · 冲刺斩
+  aegis2()  { tone(300, 0.42, 'square', 0.07, 760); tone(920, 0.28, 'sine', 0.045, 1240); },              // 苍穹剑士 · 护体金盾
+  crimson1(){ tone(600, 0.2, 'triangle', 0.07, 210); tone(1180, 0.1, 'sine', 0.035, 640); },              // 绯红术士 · 爆裂火球
+  crimson2(){ tone(1180, 0.34, 'triangle', 0.08, 380); noiseHit(0.26, 0.04, 2500); },                     // 绯红术士 · 寒霜新星
+  storm1()  { tone(660, 0.16, 'triangle', 0.06, 220); tone(1350, 0.1, 'sine', 0.04, 900); },              // 秘法星灵 · 爆裂火球
+  storm2()  { tone(1650, 0.2, 'sawtooth', 0.07, 520); noiseHit(0.14, 0.045, 3200); },                     // 秘法星灵 · 连锁闪电
+  meteor1() { tone(88, 0.6, 'sawtooth', 0.13, 36); noiseHit(0.42, 0.09, 560); },                          // 陨星法师 · 陨石天降
+  meteor2() { tone(1000, 0.34, 'triangle', 0.08, 300); noiseHit(0.28, 0.05, 2400); },                     // 陨星法师 · 寒霜新星
+  priest1() { tone(700, 0.34, 'sine', 0.06, 1050); tone(1050, 0.4, 'sine', 0.05, 1400); },                // 星辉祭司 · 治愈之光
+  priest2() { tone(580, 0.36, 'triangle', 0.07, 1140); tone(1160, 0.3, 'sine', 0.04, 1520); },            // 星辉祭司 · 护体金盾
   nav()   { tone(600, 0.06, 'square', 0.05); },
   count() { tone(680, 0.12, 'sine', 0.07); },
   go()    { tone(880, 0.28, 'sine', 0.09, 1250); }
@@ -1312,15 +1325,18 @@ class Fighter {
 
   castSkill(i, opp) {
     const sk = this.skills[i];
+    // 可选英雄拥有专属音效（<heroId>1 / <heroId>2）；AI 角色沿用技能通用音效
+    const vs = this.heroId && SFX[this.heroId + (i + 1)] ? this.heroId + (i + 1) : null;
+    const sfx = name => netSfx(vs || name);
     if (sk.id === 'dash') {
       this.targetAngle = this.angle = aimAt(this, opp);
       this.dashT = 16; this.invuln = 16;
       this.vx = Math.sin(this.angle) * 22; this.vz = Math.cos(this.angle) * 22;
       this.hitSet.clear(); this.ghosts = [];
-      netSfx('dash');
+      sfx('dash');
     } else if (sk.id === 'whirl') {
       this.whirlT = 44; this.whirlTick = 0; this.animT = 0;
-      netSfx('whirl'); netShake(5);
+      sfx('whirl'); netShake(5);
     } else if (sk.id === 'fire') {
       this.targetAngle = this.angle = aimAt(this, opp);
       this.attackT = 26; this.attackDur = 26; this.hitSet.clear();
@@ -1330,11 +1346,11 @@ class Fighter {
         Math.sin(ang) * 10, Math.cos(ang) * 10, this,
         { dmg: Math.round(24 * this.mods.power * this.mods.skillPower[0] * this.dmgMul), color: '#ff9430', r: Math.round(21 * this.mods.range), life: 150, type: 'fire' }
       ));
-      netSfx('shoot');
+      sfx('shoot');
     } else if (sk.id === 'nova') {
       this.novaT = 26;
       this.invuln = Math.max(this.invuln, 10);
-      netSfx('nova'); netShake(9);
+      sfx('nova'); netShake(9);
       const rr = 230 * this.mods.range;
       netRing(this.x, this.z, 20, rr, '#a8f0ff', 26);
       for (const e of enemiesOf(this)) {
@@ -1345,7 +1361,7 @@ class Fighter {
       // 连锁闪电：电击最近敌人，并向附近目标连锁
       this.targetAngle = this.angle = opp ? aimAt(this, opp) : this.angle;
       this.attackT = 18; this.attackDur = 18;
-      netSfx('bolt');
+      sfx('bolt');
       const dmgBase = Math.round(20 * this.mods.power * this.mods.skillPower[0] * this.dmgMul);
       let cur = opp, hitSet = new Set(), chain = 0, src = this;
       while (cur && chain < 3 && hitSet.size < 4) {
@@ -1366,7 +1382,7 @@ class Fighter {
     } else if (sk.id === 'meteor') {
       // 陨石天降：在最近敌人处造成范围重击
       this.attackT = 26; this.attackDur = 26;
-      netSfx('meteor'); netShake(12);
+      sfx('meteor'); netShake(12);
       const tx = opp ? opp.x : this.x + Math.sin(this.angle) * 300;
       const tz = opp ? opp.z : this.z + Math.cos(this.angle) * 300;
       const rr = 260 * this.mods.range;
@@ -1378,7 +1394,7 @@ class Fighter {
       }
     } else if (sk.id === 'heal') {
       // 治愈之光：为自身与周围队友回复生命
-      netSfx('heal');
+      sfx('heal');
       const rr = 460 * this.mods.range;
       netRing(this.x, this.z, 20, rr, '#9dffc0', 28);
       for (const a of alliesOf(this)) {
@@ -1393,7 +1409,7 @@ class Fighter {
       this.invuln = Math.max(this.invuln, 12);
     } else if (sk.id === 'shield') {
       // 护体金盾：短时间无敌
-      netSfx('shield');
+      sfx('shield');
       this.invuln = Math.max(this.invuln, Math.round(100 * this.mods.skillPower[0]));
       netRing(this.x, this.z, 10, 120, '#ffd166', 30);
       netFloater({ x: this.x, y: this.y + 190, z: this.z, text: '护盾', vy: 1.2, life: 50, color: '#ffd166' });
