@@ -359,6 +359,9 @@ try {
   renderer.setSize(W, H);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;     // 电影感色调映射，让金属/自发光更通透
+  renderer.toneMappingExposure = 1.05;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
   stage.appendChild(renderer.domElement);
   renderer.domElement.style.zIndex = '1';
 } catch (err) {
@@ -367,16 +370,16 @@ try {
 }
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x0a1030, 2600, 6600);
+scene.fog = new THREE.Fog(0x0a1030, 2800, 7000);
 
 const camera = new THREE.PerspectiveCamera(48, W / H, 1, 9000);
 camera.position.set(0, 900, 620);
 camera.lookAt(0, 0, 0);
 
 // ---- 光照 ----
-const hemi = new THREE.HemisphereLight(0x9db4ff, 0x1a1030, 0.85);
+const hemi = new THREE.HemisphereLight(0xa8c0ff, 0x1a1030, 0.95);
 scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xffffff, 1.05);
+const sun = new THREE.DirectionalLight(0xfff2dc, 1.15);
 sun.position.set(420, 900, 320);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
@@ -384,10 +387,17 @@ sun.shadow.camera.near = 100; sun.shadow.camera.far = 5200;
 sun.shadow.camera.left = -2100; sun.shadow.camera.right = 2100;
 sun.shadow.camera.top = 2100; sun.shadow.camera.bottom = -2100;
 sun.shadow.bias = -0.0009;
+sun.shadow.normalBias = 0.02;
 scene.add(sun);
-const rim = new THREE.DirectionalLight(0x6f8fff, 0.45);
+const rim = new THREE.DirectionalLight(0x6f8fff, 0.55);
 rim.position.set(-500, 400, -600);
 scene.add(rim);
+const fill = new THREE.DirectionalLight(0xffe2a8, 0.28);     // 暖色补光（侧后方）
+fill.position.set(-300, 280, 600);
+scene.add(fill);
+const underGlow = new THREE.PointLight(0x6688ff, 0.9, 4200, 1.2);  // 地面蓝色光晕
+underGlow.position.set(0, 60, 0);
+scene.add(underGlow);
 
 // ---- 天空背景（画布生成的渐变 + 星月） ----
 function makeSkyTexture() {
@@ -485,7 +495,45 @@ function makeGroundTexture() {
   t.anisotropy = 4;
   return t;
 }
-const groundMat = new THREE.MeshStandardMaterial({ map: makeGroundTexture(), roughness: 1, metalness: 0 });
+// 由 ground 颜色纹理生成对应的法线贴图，让地面有「地砖 / 符文」的凹凸感
+function makeGroundNormal(srcTex) {
+  const src = srcTex.image;
+  const w = src.width, h = src.height;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  const data = src.getContext('2d').getImageData(0, 0, w, h).data;
+  const out = g.createImageData(w, h);
+  const N = out.data;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const r = x > 0 ? data[i - 4] : data[i];
+      const l = x < w - 1 ? data[i + 4] : data[i];
+      const u = y > 0 ? data[i - w * 4] : data[i];
+      const d = y < h - 1 ? data[i + w * 4] : data[i];
+      const dx = ((l - r) & 0xff) / 255;
+      const dy = ((d - u) & 0xff) / 255;
+      // 蓝 (Z) 始终为正向，XY 体现颜色差产生的「浮雕」
+      N[i] = 128 + dx * 96;
+      N[i + 1] = 128 + dy * 96;
+      N[i + 2] = 235;
+      N[i + 3] = 255;
+    }
+  }
+  out.data.set(N);
+  g.putImageData(out, 0, 0);
+  const t = new THREE.CanvasTexture(c);
+  t.anisotropy = 4;
+  return t;
+}
+const _groundColorTex = makeGroundTexture();
+const groundMat = new THREE.MeshStandardMaterial({
+  map: _groundColorTex,
+  normalMap: makeGroundNormal(_groundColorTex),
+  normalScale: new THREE.Vector2(0.6, 0.6),
+  roughness: 0.85, metalness: 0.05
+});
 const ground = new THREE.Mesh(new THREE.PlaneGeometry(GROUND_TEX_HALF * 2, GROUND_TEX_HALF * 2), groundMat);
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
@@ -508,7 +556,14 @@ const obsSideMat = new THREE.MeshStandardMaterial({ color: 0x232c55, roughness: 
 const obsEdgeMat = new THREE.MeshBasicMaterial({ color: 0x6f8fff, transparent: true, opacity: 0.35 });
 
 function buildObstacleMeshes() {
-  for (const m of obstacleMeshes) { scene.remove(m); m.geometry.dispose(); }
+  for (const m of obstacleMeshes) {
+    scene.remove(m);
+    if (m.geometry) m.geometry.dispose();
+    if (m.material) {
+      const ms = Array.isArray(m.material) ? m.material : [m.material];
+      for (const x of ms) if (x && x.dispose) x.dispose();
+    }
+  }
   obstacleMeshes = [];
   for (const o of OBSTACLES) {
     const box = new THREE.Mesh(new THREE.BoxGeometry(o.hx * 2, o.h, o.hz * 2),
@@ -516,6 +571,14 @@ function buildObstacleMeshes() {
     box.position.set(o.x, o.h / 2, o.z);
     box.castShadow = true; box.receiveShadow = true;
     scene.add(box); obstacleMeshes.push(box);
+    // 描边（沿 BoxGeometry 边的硬边线）
+    const edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(box.geometry, 30),
+      new THREE.LineBasicMaterial({ color: 0x8aa6ff, transparent: true, opacity: 0.5, depthWrite: false })
+    );
+    edges.position.copy(box.position);
+    scene.add(edges); obstacleMeshes.push(edges);
+    // 顶部光带
     const edge = new THREE.Mesh(new THREE.BoxGeometry(o.hx * 2 + 6, 4, o.hz * 2 + 6), obsEdgeMat);
     edge.position.set(o.x, o.h, o.z);
     scene.add(edge); obstacleMeshes.push(edge);
@@ -936,6 +999,18 @@ function rollTeamUpgrades(ts) {
 function matStandard(color, rough, metal) {
   return new THREE.MeshStandardMaterial({ color: new THREE.Color(color), roughness: rough === undefined ? 0.55 : rough, metalness: metal === undefined ? 0.35 : metal });
 }
+function matEmissive(color, intensity) {                          // 自发光材质（用于宝石 / 法阵 / 武器握柄）
+  return new THREE.MeshStandardMaterial({ color: new THREE.Color(color), emissive: new THREE.Color(color), emissiveIntensity: intensity === undefined ? 0.6 : intensity, roughness: 0.4, metalness: 0.2 });
+}
+function addEdges(obj, color, opacity) {                          // 给物体描边（卡通外发光风格）
+  const e = new THREE.EdgesGeometry(obj.geometry, 18);
+  const m = new THREE.LineSegments(e, new THREE.LineBasicMaterial({ color: color || 0x9fb4ff, transparent: true, opacity: opacity === undefined ? 0.55 : opacity, depthWrite: false }));
+  m.position.copy(obj.position);
+  m.rotation.copy(obj.rotation);
+  m.scale.copy(obj.scale);
+  m.renderOrder = 2;
+  return m;
+}
 function boxMesh(w, h, d, mat, px, py, pz) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
   m.castShadow = true; m.receiveShadow = true;
@@ -962,40 +1037,66 @@ function buildSwordHero(color, color2) {
   const main = matStandard(color, 0.45, 0.55);   // 红甲
   const dark = matStandard(color2, 0.5, 0.5);
   const skin = matStandard('#f0c39c', 0.85, 0.1);
-  const gold = matStandard('#ffd166', 0.35, 0.8);
-  const steel = new THREE.MeshStandardMaterial({ color: 0xdfe9ff, roughness: 0.25, metalness: 0.9 });
-  const mats = [main, dark, skin, gold, steel];   // 本英雄专属材质（受击闪白用）
+  const gold = matStandard('#ffd166', 0.35, 0.85);
+  const steel = new THREE.MeshStandardMaterial({ color: 0xe2ecff, roughness: 0.18, metalness: 0.95, envMapIntensity: 1.2 });
+  const glow = matEmissive('#ffe6a8', 0.9);             // 剑柄宝石
+  const mats = [main, dark, skin, gold, steel, glow];   // 本英雄专属材质（受击闪白用）
 
   // 腿（髋部为轴）
   const legL = limbPivot(16, 62, 18, dark, -13, 66);
   const legR = limbPivot(16, 62, 18, main, 13, 66);
+  // 膝甲
+  grp.add(sphereMesh(11, dark, -13, 36, 0, 10));
+  grp.add(sphereMesh(11, dark, 13, 36, 0, 10));
+  // 战靴
+  grp.add(boxMesh(22, 10, 30, dark, -13, 4, 4));
+  grp.add(boxMesh(22, 10, 30, dark, 13, 4, 4));
   grp.add(legL, legR);
-  // 躯干
+  // 躯干（多层堆叠 + 腰带）
   const body = boxMesh(50, 66, 32, main, 0, 105, 0);
   grp.add(body);
-  grp.add(boxMesh(52, 12, 34, dark, 0, 72, 0));            // 腰带
-  grp.add(sphereMesh(13, dark, -27, 132, 0));              // 肩甲
-  grp.add(sphereMesh(13, dark, 27, 132, 0));
-  grp.add(sphereMesh(6, gold, 0, 100, 16));                // 胸甲宝石
+  grp.add(boxMesh(54, 16, 36, dark, 0, 138, 0));           // 胸甲上沿
+  grp.add(boxMesh(46, 6, 28, gold, 0, 80, 17));            // 腰带金边
+  grp.add(sphereMesh(8, gold, 0, 80, 18, 12));             // 腰扣
+  grp.add(boxMesh(28, 22, 4, dark, 0, 122, 17));           // 胸甲中央脊
+  grp.add(sphereMesh(7, glow, 0, 122, 18, 10));            // 胸口宝石（自发光）
+  // 肩甲（带尖刺）
+  grp.add(sphereMesh(16, dark, -27, 132, 0, 14));
+  grp.add(sphereMesh(16, dark, 27, 132, 0, 14));
+  grp.add(boxMesh(8, 22, 8, dark, -27, 154, 0));           // 左肩刺
+  grp.add(boxMesh(8, 22, 8, dark, 27, 154, 0));            // 右肩刺
   // 头
-  const head = sphereMesh(20, skin, 0, 156, 0);
+  const head = sphereMesh(20, skin, 0, 156, 0, 18);
   grp.add(head);
   grp.add(sphereMesh(21, dark, 0, 160, -2, 16));           // 头盔
   const crest = boxMesh(6, 26, 20, main, 0, 186, -4);      // 头盔冠羽
   crest.rotation.x = -0.15;
   grp.add(crest);
+  // 眼罩发光
+  grp.add(boxMesh(20, 3, 4, glow, 0, 161, 18));
   // 手臂
   const armL = limbPivot(14, 58, 14, dark, -27, 130);
   const armR = limbPivot(14, 58, 14, skin, 27, 130);
+  // 护腕
+  grp.add(boxMesh(16, 8, 16, dark, -27, 102, 0));
+  grp.add(boxMesh(16, 8, 16, dark, 27, 102, 0));
   grp.add(armL, armR);
   // 剑（挂在右臂手部）
   const sword = new THREE.Group();
   sword.position.set(0, -56, 0);
-  const blade = boxMesh(8, 96, 14, steel, 0, -46, 0);
+  const blade = boxMesh(10, 96, 14, steel, 0, -46, 0);
+  const bladeGlow = boxMesh(4, 86, 8, glow, 0, -46, 0);     // 剑身中央自发光槽
   const guard = boxMesh(28, 8, 16, gold, 0, -4, 0);
   const hilt = boxMesh(8, 16, 8, dark, 0, 6, 0);
-  sword.add(blade, guard, hilt);
+  const pommel = sphereMesh(6, glow, 0, 16, 0, 10);
+  sword.add(blade, bladeGlow, guard, hilt, pommel);
   armR.add(sword);
+
+  // 描边（躯干 / 头 / 剑身 / 肩甲 描出硬朗的卡通边线）
+  const edgeColor = new THREE.Color(color2).offsetHSL(0, 0.1, -0.2).getHex();
+  grp.add(addEdges(body, edgeColor, 0.55));
+  grp.add(addEdges(blade, 0xb8c8ff, 0.7));
+  grp.add(addEdges(guard, 0xffe8a8, 0.75));
 
   grp.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   return { group: grp, parts: { legL, legR, armL, armR, head, body, weapon: sword, glow: null }, mats };
@@ -1006,50 +1107,84 @@ function buildMageHero(color, color2) {
   const main = matStandard(color, 0.5, 0.3);      // 蓝袍
   const dark = matStandard(color2, 0.55, 0.3);
   const skin = matStandard('#f0c39c', 0.85, 0.1);
-  const gold = matStandard('#ffd166', 0.35, 0.8);
-  const glowMat = new THREE.MeshBasicMaterial({ color: 0xa8e4ff });
-  const mats = [main, dark, skin, gold];   // 本英雄专属材质（受击闪白用）
+  const gold = matStandard('#ffd166', 0.35, 0.85);
+  const glowMat = matEmissive('#a8e4ff', 1.1);
+  const mats = [main, dark, skin, gold];           // 本英雄专属材质（受击闪白用）
 
-  // 长袍（下摆锥形）
-  const robe = new THREE.Mesh(new THREE.CylinderGeometry(30, 52, 108, 18), main);
-  robe.position.set(0, 56, 0); robe.castShadow = true; robe.receiveShadow = true;
+  // 长袍（双层锥形，下摆外展）
+  const robe = new THREE.Mesh(new THREE.CylinderGeometry(28, 56, 112, 20), main);
+  robe.position.set(0, 58, 0); robe.castShadow = true; robe.receiveShadow = true;
   grp.add(robe);
+  const robeEdge = new THREE.Mesh(new THREE.TorusGeometry(56, 3, 8, 36), dark);
+  robeEdge.rotation.x = Math.PI / 2; robeEdge.position.set(0, 4, 0);
+  grp.add(robeEdge);
   // 上身
   grp.add(boxMesh(40, 52, 28, main, 0, 120, 0));
   grp.add(boxMesh(42, 10, 30, dark, 0, 100, 0));
-  grp.add(sphereMesh(5, glowMat, 0, 120, 15));
+  grp.add(boxMesh(8, 18, 4, dark, 0, 122, 16));            // 胸甲脊
+  grp.add(sphereMesh(6, glowMat, 0, 122, 17, 10));         // 胸口宝石
+  // 披风（从肩部后伸出的梯形）
+  const cape = boxMesh(46, 80, 4, dark, 0, 110, -18);
+  cape.castShadow = true;
+  grp.add(cape);
+  // 肩帽（带金边）
+  grp.add(sphereMesh(11, dark, -23, 134, 0, 12));
+  grp.add(sphereMesh(11, dark, 23, 134, 0, 12));
+  grp.add(sphereMesh(5, gold, -23, 142, 0, 10));
+  grp.add(sphereMesh(5, gold, 23, 142, 0, 10));
   // 头 + 尖帽
-  const head = sphereMesh(19, skin, 0, 158, 0);
+  const head = sphereMesh(19, skin, 0, 158, 0, 18);
   grp.add(head);
-  const hat = new THREE.Mesh(new THREE.ConeGeometry(26, 50, 18), dark);
+  // 脸庞符文
+  grp.add(sphereMesh(2, glowMat, -5, 158, 17, 8));
+  grp.add(sphereMesh(2, glowMat, 5, 158, 17, 8));
+  const hat = new THREE.Mesh(new THREE.ConeGeometry(26, 50, 20), dark);
   hat.position.set(0, 194, 0); hat.castShadow = true;
   grp.add(hat);
-  const brim = new THREE.Mesh(new THREE.CylinderGeometry(34, 34, 5, 20), dark);
-  brim.position.set(0, 172, 0); brim.castShadow = true;
-  grp.add(brim);
+  const hatBrim = new THREE.Mesh(new THREE.CylinderGeometry(34, 34, 5, 24), dark);
+  hatBrim.position.set(0, 172, 0); hatBrim.castShadow = true;
+  grp.add(hatBrim);
+  // 帽尖宝石
+  grp.add(sphereMesh(5, glowMat, 0, 222, 0, 10));
   // 手臂
   const armL = limbPivot(13, 56, 13, main, -23, 132);
   const armR = limbPivot(13, 56, 13, skin, 23, 132);
+  // 护腕
+  grp.add(boxMesh(15, 6, 15, dark, -23, 106, 0));
+  grp.add(boxMesh(15, 6, 15, dark, 23, 106, 0));
   grp.add(armL, armR);
   // 法杖
   const staff = new THREE.Group();
   staff.position.set(0, -56, 0);
-  const rod = new THREE.Mesh(new THREE.CylinderGeometry(4, 4, 170, 10), matStandard('#6b4a2f', 0.8, 0.1));
+  const rod = new THREE.Mesh(new THREE.CylinderGeometry(4, 4, 170, 12), matStandard('#6b4a2f', 0.7, 0.15));
   rod.position.set(0, 10, 0); rod.castShadow = true;
   staff.add(rod);
-  const orb = sphereMesh(13, glowMat, 0, 92, 0);
+  // 法杖金箍
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(7, 1.4, 6, 18), gold);
+  ring.rotation.x = Math.PI / 2; ring.position.set(0, 70, 0);
+  staff.add(ring);
+  const orb = sphereMesh(14, glowMat, 0, 92, 0, 16);
   staff.add(orb);
-  const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: sparkTex, color: 0x9fd8ff, transparent: true, opacity: 0.75, blending: THREE.AdditiveBlending, depthWrite: false }));
-  halo.scale.setScalar(70); halo.position.set(0, 92, 0);
+  const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: sparkTex, color: 0x9fd8ff, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }));
+  halo.scale.setScalar(78); halo.position.set(0, 92, 0);
   staff.add(halo);
   armR.add(staff);
 
-  // 头顶悬浮星灵
-  const star = sphereMesh(7, glowMat, 0, 236, 0, 12);
+  // 头顶悬浮星灵 + 旋转光圈
+  const star = sphereMesh(8, glowMat, 0, 236, 0, 14);
   grp.add(star);
+  const starHalo = new THREE.Mesh(new THREE.TorusGeometry(14, 1.2, 6, 28), glowMat);
+  starHalo.rotation.x = Math.PI / 2; starHalo.position.set(0, 236, 0);
+  grp.add(starHalo);
+
+  // 描边（披风 / 帽 / 法杖 / 头）
+  const edgeColor = new THREE.Color(color2).offsetHSL(0, 0.1, -0.15).getHex();
+  grp.add(addEdges(cape, edgeColor, 0.45));
+  grp.add(addEdges(hat, edgeColor, 0.5));
+  grp.add(addEdges(rod, 0x8a5a30, 0.55));
 
   grp.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
-  return { group: grp, parts: { legL: null, legR: null, armL, armR, head, body: null, weapon: staff, glow: star }, mats };
+  return { group: grp, parts: { legL: null, legR: null, armL, armR, head, body: null, weapon: staff, glow: star, starHalo }, mats };
 }
 
 // 技能指向指示（贴地平面，朝对手方向延伸）
@@ -1069,7 +1204,7 @@ function makeAimIndicator(color) {
 function disposeObject(root) {
   if (!root) return;
   root.traverse(o => {
-    if (o.isMesh) {
+    if (o.isMesh || o.isLineSegments) {
       if (o.geometry) o.geometry.dispose();
       if (o.material) {
         const ms = Array.isArray(o.material) ? o.material : [o.material];
@@ -1512,7 +1647,10 @@ class Fighter {
       const casting = this.attackT > 0 || this.novaT > 0;
       P.armR.rotation.x = casting ? -1.35 : (walking ? -swing * 0.5 : 0.12);
       P.armL.rotation.x = walking ? swing * 0.5 : 0.12;
-      if (P.glow) P.glow.position.y = 236 + Math.sin(this.animT * 0.08) * 5;
+      if (P.glow) {
+        P.glow.position.y = 236 + Math.sin(this.animT * 0.08) * 5;
+        if (P.starHalo) P.starHalo.rotation.z = this.animT * 0.04;
+      }
     }
     if (P.head) P.head.rotation.z = 0;
 
