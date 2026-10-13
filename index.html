@@ -193,6 +193,23 @@ const SFX = {
   meteor2() { tone(1000, 0.34, 'triangle', 0.08, 300); noiseHit(0.28, 0.05, 2400); },                     // 陨星法师 · 寒霜新星
   priest1() { tone(700, 0.34, 'sine', 0.06, 1050); tone(1050, 0.4, 'sine', 0.05, 1400); },                // 星辉祭司 · 治愈之光
   priest2() { tone(580, 0.36, 'triangle', 0.07, 1140); tone(1160, 0.3, 'sine', 0.04, 1520); },            // 星辉祭司 · 护体金盾
+  // ---- 名册（AI）英雄专属技能音效：每位英雄 2 条（对应其首 / 次技能）----
+  ember1()  { tone(820, 0.15, 'square', 0.07, 240); noiseHit(0.09, 0.04, 2000); },                         // 赤炎刀锋 · 冲刺斩
+  ember2()  { tone(480, 0.4, 'square', 0.075, 900); noiseHit(0.34, 0.045, 1500); },                       // 赤炎刀锋 · 烈焰旋风
+  blood1()  { tone(1000, 0.12, 'sawtooth', 0.065, 300); noiseHit(0.08, 0.05, 2600); },                    // 血月刺客 · 冲刺斩
+  blood2()  { tone(620, 0.38, 'triangle', 0.07, 1200); tone(1240, 0.2, 'sine', 0.03, 1800); noiseHit(0.3, 0.04, 2000); },  // 血月刺客 · 烈焰旋风
+  pyro1()   { tone(700, 0.2, 'sawtooth', 0.07, 200); tone(1400, 0.1, 'square', 0.03, 500); },             // 烈焰法师 · 爆裂火球
+  pyro2()   { tone(1100, 0.3, 'sawtooth', 0.08, 360); noiseHit(0.26, 0.05, 2200); },                      // 烈焰法师 · 寒霜新星
+  spirit1() { tone(760, 0.18, 'sine', 0.065, 280); tone(1520, 0.09, 'sine', 0.035, 760); },               // 秘法星灵 · 爆裂火球
+  spirit2() { tone(1320, 0.34, 'triangle', 0.08, 420); tone(660, 0.28, 'sine', 0.04, 1320); noiseHit(0.26, 0.045, 2800); },  // 秘法星灵 · 寒霜新星
+  vault1()  { tone(400, 0.18, 'triangle', 0.07, 900); noiseHit(0.1, 0.045, 1400); },                       // 苍穹剑士 · 冲刺斩
+  vault2()  { tone(260, 0.44, 'triangle', 0.075, 700); noiseHit(0.36, 0.04, 1300); },                      // 苍穹剑士 · 烈焰旋风
+  frost1()  { tone(920, 0.2, 'sine', 0.06, 320); noiseHit(0.1, 0.035, 3000); },                            // 寒霜法师 · 爆裂火球
+  frost2()  { tone(1500, 0.32, 'sine', 0.085, 700); tone(880, 0.3, 'triangle', 0.05, 1600); },            // 寒霜法师 · 寒霜新星
+  tide1()   { tone(520, 0.16, 'sine', 0.065, 240); noiseHit(0.1, 0.04, 1700); },                           // 碧海刀客 · 冲刺斩
+  tide2()   { tone(300, 0.42, 'sine', 0.075, 820); tone(760, 0.24, 'triangle', 0.04, 1400); },            // 碧海刀客 · 烈焰旋风
+  volt1()   { tone(1200, 0.16, 'square', 0.06, 380); tone(1600, 0.1, 'sawtooth', 0.035, 900); },          // 紫电术士 · 爆裂火球
+  volt2()   { tone(1700, 0.28, 'sawtooth', 0.075, 500); noiseHit(0.22, 0.05, 3200); },                     // 紫电术士 · 寒霜新星
   nav()   { tone(600, 0.06, 'square', 0.05); },
   count() { tone(680, 0.12, 'sine', 0.07); },
   go()    { tone(880, 0.28, 'sine', 0.09, 1250); }
@@ -1069,6 +1086,7 @@ class Fighter {
   constructor(cfg) {
     this.name = cfg.name;
     this.heroId = cfg.heroId || null;
+    this.sfxSet = cfg.sfxSet || null;   // 专属技能音效前缀（如 blaze → blaze1 / blaze2）
     this.color = cfg.color;
     this.color2 = cfg.color2;
     this.type = cfg.type;
@@ -1112,6 +1130,7 @@ class Fighter {
   // 选人：按英雄定义重建外观、属性与技能（用于本机操控的角色）
   applyHero(def) {
     this.heroId = def.id;
+    this.sfxSet = def.sid || def.id || null;
     this.name = def.name;
     this.color = def.color; this.color2 = def.color2;
     this.type = def.type;
@@ -1330,8 +1349,9 @@ class Fighter {
 
   castSkill(i, opp) {
     const sk = this.skills[i];
-    // 可选英雄拥有专属音效（<heroId>1 / <heroId>2）；AI 角色沿用技能通用音效
-    const vs = this.heroId && SFX[this.heroId + (i + 1)] ? this.heroId + (i + 1) : null;
+    // 每位英雄拥有专属技能音效（<sfxSet>1 / <sfxSet>2）；未配置的英雄回退到技能通用音效
+    const set = this.sfxSet;
+    const vs = set && SFX[set + (i + 1)] ? set + (i + 1) : null;
     const sfx = name => netSfx(vs || name);
     if (sk.id === 'dash') {
       this.targetAngle = this.angle = aimAt(this, opp);
@@ -2229,18 +2249,18 @@ let kills = [0, 0];                // 每队本回合击杀数
 // ---- 英雄名册：红蓝各 5 名，近战/远程交替 ----
 const ROSTER = [
   [ // 红方（TEAM_RED）
-    { name: '烈焰剑客', color: '#ff5a5f', color2: '#a81f38', type: 'sword' },
-    { name: '赤炎刀锋', color: '#ff7a3d', color2: '#a83c12', type: 'sword' },
-    { name: '绯红术士', color: '#ff6b8a', color2: '#9e2445', type: 'mage' },
-    { name: '血月刺客', color: '#e0455f', color2: '#7c1230', type: 'sword' },
-    { name: '烈焰法师', color: '#ff8f5a', color2: '#a04a1c', type: 'mage' }
+    { name: '烈焰剑客', color: '#ff5a5f', color2: '#a81f38', type: 'sword', sid: 'blaze' },
+    { name: '赤炎刀锋', color: '#ff7a3d', color2: '#a83c12', type: 'sword', sid: 'ember' },
+    { name: '绯红术士', color: '#ff6b8a', color2: '#9e2445', type: 'mage',  sid: 'crimson' },
+    { name: '血月刺客', color: '#e0455f', color2: '#7c1230', type: 'sword', sid: 'blood' },
+    { name: '烈焰法师', color: '#ff8f5a', color2: '#a04a1c', type: 'mage',  sid: 'pyro' }
   ],
   [ // 蓝方（TEAM_BLUE）
-    { name: '秘法星灵', color: '#4fa8ff', color2: '#1b4f9e', type: 'mage' },
-    { name: '苍穹剑士', color: '#5b8cff', color2: '#1e3a8e', type: 'sword' },
-    { name: '寒霜法师', color: '#57d4ff', color2: '#146a9e', type: 'mage' },
-    { name: '碧海刀客', color: '#4fc3c8', color2: '#146a72', type: 'sword' },
-    { name: '紫电术士', color: '#8f7bff', color2: '#3a2598', type: 'mage' }
+    { name: '秘法星灵', color: '#4fa8ff', color2: '#1b4f9e', type: 'mage',  sid: 'spirit' },
+    { name: '苍穹剑士', color: '#5b8cff', color2: '#1e3a8e', type: 'sword', sid: 'vault' },
+    { name: '寒霜法师', color: '#57d4ff', color2: '#146a9e', type: 'mage',  sid: 'frost' },
+    { name: '碧海刀客', color: '#4fc3c8', color2: '#146a72', type: 'sword', sid: 'tide' },
+    { name: '紫电术士', color: '#8f7bff', color2: '#3a2598', type: 'mage',  sid: 'volt' }
   ]
 ];
 
@@ -2284,14 +2304,14 @@ for (let side = 0; side < 2; side++) {
     const h = ROSTER[side][i];
     // 名册默认配置（未选人 / AI 角色使用；选人后可用它还原）
     const def = {
-      id: null, name: h.name, color: h.color, color2: h.color2, type: h.type,
+      id: null, sid: h.sid, name: h.name, color: h.color, color2: h.color2, type: h.type,
       maxHp: h.type === 'sword' ? 220 : 200,
       speed: h.type === 'sword' ? 5.9 : 4.7,
       skills: SKILLS[h.type].map(s => s.id)
     };
     const f = new Fighter({
       name: def.name, color: def.color, color2: def.color2, type: def.type,
-      maxHp: def.maxHp, speed: def.speed, skills: def.skills,
+      maxHp: def.maxHp, speed: def.speed, skills: def.skills, sfxSet: def.sid,
       side: side, slot: i,
       startX: side === TEAM_RED ? -SPAWN_X : SPAWN_X,
       startZ: SLOT_Z[i],
