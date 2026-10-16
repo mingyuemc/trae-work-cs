@@ -1789,6 +1789,8 @@ const net = {
   guestPick: -1, sentObstacleVer: -1,
   mySlot: -1,
   pendingPeer: null,
+  heroSig: '',                  // 上次广播过的英雄组合签名（仅在变化时下发）
+  waitUI: false,                // 当前 DOM 覆盖层是否为「大厅 / 等待」界面（可被快照自动关闭）
   sendTo(peer, o) {
     if (peer && peer.dc && peer.dc.readyState === 'open') { try { peer.dc.send(JSON.stringify(o)); } catch (e) { } }
   },
@@ -1798,9 +1800,13 @@ function newPeer(slot) {
   return {
     pc: null, dc: null, slot: slot, fighter: slot >= 0 ? fighters[slot] : null,
     held: { up: false, down: false, left: false, right: false },
-    edges: null, remoteSeq: -1, rtt: 0, pingSent: 0, ready: false
+    edges: null, remoteSeq: -1, rtt: 0, pingSent: 0, ready: false,
+    cancelled: false            // 主动取消 / 已处理过断开，避免重复通知
   };
 }
+// 对局内的临时提示（断线等）：DOM 覆盖层已隐藏时也能让玩家看到
+let netNotice = '', netNoticeT = 0;
+function netNotify(s) { netNotice = s; netNoticeT = 360; }
 
 // ---- 特效 / 音效事件：主机产生，客户端回放 ----
 function netEmit(e) { if (net.active && net.role === 'host') net.events.push(e); }
@@ -1902,12 +1908,11 @@ function applySnapshot(s) {
     matchTeamSize = s.tsz;
     for (const f of fighters) f.bench = f.slot >= matchTeamSize;
   }
-  if (s.hero) {                       // 同步主机所选英雄的外观 / 技能
-    for (let side = 0; side < 2; side++) {
-      const f = side === 0 ? redTeam[0] : blueTeam[0];
-      const id = s.hero[side];
-      if (id && f.heroId !== id) { const d = HEROES.find(h => h.id === id); if (d) f.applyHero(d); }
-      else if (!id && f.heroId) f.applyHero(f.rosterDef);
+  if (s.hero) {                       // 同步双方全部英雄的外观 / 技能（含客户端占用的槽位）
+    for (let i = 0; i < fighters.length && i < s.hero.length; i++) {
+      const f = fighters[i], id = s.hero[i];
+      if (id) { if (f.heroId !== id) { const d = HEROES.find(h => h.id === id); if (d) f.applyHero(d); } }
+      else if (f.heroId) f.applyHero(f.rosterDef);
     }
   }
   for (let i = 0; i < fighters.length; i++) applyFighterState(fighters[i], s.f[i]);
@@ -1943,13 +1948,18 @@ function netHostSend() {
     f: fighters.map(fighterState),
     pj: projectiles.map(p => [p.__id, Math.round(p.x), Math.round(p.y), Math.round(p.z), p.type, p.color, p.r]),
     tsz: matchTeamSize,
-    hero: [redTeam[0].heroId || null, blueTeam[0].heroId || null],
     ev: net.events
   };
   // 障碍布局变更时随快照下发（保持两端一致）
   if (net.sentObstacleVer !== obstacleVer) {
     snap.obs = OBSTACLES.map(o => [Math.round(o.x), Math.round(o.z), Math.round(o.hx), Math.round(o.hz), Math.round(o.h)]);
     net.sentObstacleVer = obstacleVer;
+  }
+  // 英雄组合变化时随快照下发（含蓝方各客户端槽位，避免 1v1/5v5 中途改选不同步）
+  const heroSig = fighters.map(f => f.heroId || '').join(',');
+  if (heroSig !== net.heroSig) {
+    snap.hero = fighters.map(f => f.heroId || null);
+    net.heroSig = heroSig;
   }
   if (gameState === 'upgrade') {
     snap.up = { ph: upgradePhase, sel: upgradeSel, c: [upgradeChoices[0].map(u => u.id), upgradeChoices[1].map(u => u.id)] };
@@ -1988,6 +1998,15 @@ function netGuestStep() {
       });
     }
     if (consume('KeyM')) { muted = !muted; Music.apply(0.15); }
+  }
+  // 客户端也要处理这些「非模拟」输入（原本只存在于主机的 simulate 分支）：
+  // 请求暂停、结算 / 中途退出返回主菜单，否则客户端只能刷新页面。
+  if (consume('KeyP')) net.sendTo(peer, { t: 'pause' });
+  if ((gameState === 'gameover' && (consume('Enter') || consume('Space'))) || consume('Escape')) {
+    netTeardown();
+    gameState = 'menu'; stateT = 0;
+    menuIndex = currentMode < MENU.length ? currentMode : 0;
+    clearPressed(); return;
   }
   if (net.latestSnap) { applySnapshot(net.latestSnap); net.latestSnap = null; }
   updateFloaters(); updateSparks(); updateRings();
@@ -2036,14 +2055,27 @@ function netOnMessage(m, peer) {
     for (let i = 0; i < peer.edges.skills.length; i++) if (d.skills[i]) peer.edges.skills[i] = true;
   } else if (m.t === 's') {                 // 客户端：应用权威快照
     net.latestSnap = m.d;
-    if (gameState === 'netlobby') netHide();
+    // 仅当主机已真正离开大厅（开始对战 / 结束）时才关闭等待界面，
+    // 否则客户端在等待阶段就看不到任何提示与退出入口。
+    if (net.waitUI && m.d.gs && m.d.gs !== 'netlobby') { net.waitUI = false; netHide(); }
   } else if (m.t === 'hello') {             // 客户端：得知自己操控的角色
     net.mySlot = m.slot;
     const f = fighters[m.slot];
-    f.ai = null; f.netRemote = false; f.netPeer = null; f.controls = SCHEME_A;
+    f.ai = null; f.netRemote = false; f.netPeer = null;
+    f.controls = SCHEME_B;                  // 客户端操控蓝方，使用蓝方键位方案
     teamState[1].hasHuman = true; teamState[1].remote = true;
     humans.length = 0; humans.push(f);
+    // 客户端沿用自己在选人界面的选择，并上报给主机（否则主机会用名册默认英雄模拟，与本地表现不一致）
+    const pick = HEROES[selHero[0]];
+    if (pick) { f.applyHero(pick); net.sendTo(peer, { t: 'hero', id: pick.id }); }
     netShowWaiting('已连接（操控：' + f.name + '），等待主机开始…');
+  } else if (m.t === 'hero') {              // 主机：应用客户端选择的英雄
+    if (net.role === 'host' && peer.fighter) {
+      const d = HEROES.find(h => h.id === m.id);
+      if (d) peer.fighter.applyHero(d);
+    }
+  } else if (m.t === 'pause') {             // 主机：响应客户端的暂停请求
+    if (net.role === 'host') { paused = !paused; Music.duck = paused ? 0.3 : 1; Music.apply(0.25); }
   } else if (m.t === 'pick') {
     net.guestPick = m.p;
   } else if (m.t === 'ping') {
@@ -2055,10 +2087,10 @@ function netOnMessage(m, peer) {
   }
 }
 
-// 主机：新客户端接入
+// 新客户端接入（主机侧装配远端输入；客户端侧仅切换为快照渲染模式）
 function netOnPeerConnected(peer) {
-  peer.edges = peer.edges || newPeerEdges(peer.fighter);
   if (net.role === 'host') {
+    peer.edges = peer.edges || newPeerEdges(peer.fighter);
     if (net.peers.indexOf(peer) < 0) net.peers.push(peer);
     net.active = true; net.connected = true;
     const f = peer.fighter;
@@ -2068,12 +2100,15 @@ function netOnPeerConnected(peer) {
     net.pendingPeer = null;
     netShowHostRoom();
   } else {
+    // 客户端：peer.fighter 此时为 null（槽位由 'hello' 告知），不能据此构造远端输入
     net.connected = true; net.active = true;
   }
 }
 
 // 断线处理：主机移除该客户端并把其角色交还 AI
 function netDropPeer(peer, msg) {
+  if (peer.cancelled) return;             // 主动取消 / 已处理过，避免重复关闭与重复提示
+  peer.cancelled = true;
   if (peer.dc) { try { peer.dc.close(); } catch (e) { } }
   if (peer.pc) { try { peer.pc.close(); } catch (e) { } }
   if (net.role === 'guest') { netEnd(msg); return; }
@@ -2084,11 +2119,18 @@ function netDropPeer(peer, msg) {
   const still = net.peers.length > 0;
   teamState[1].hasHuman = still; teamState[1].remote = still;
   if (gameState === 'netlobby') netShowHostRoom();
-  else netMsg(msg);
+  else { netNotify(msg); netMsg(msg); }   // 对局中覆盖层已隐藏，用 HUD 提示保证可见
 }
 
 // 主机：开始对战（分配真人 / AI 角色）
 function startNetMatch() {
+  // 未完成握手的连接直接作废，避免点「开始对战」后对方才连上而中途插入一名玩家
+  if (net.pendingPeer) {
+    net.pendingPeer.cancelled = true;
+    if (net.pendingPeer.dc) { try { net.pendingPeer.dc.close(); } catch (e) { } }
+    if (net.pendingPeer.pc) { try { net.pendingPeer.pc.close(); } catch (e) { } }
+    net.pendingPeer = null;
+  }
   net.active = true;
   aiLevel = null;
   matchTeamSize = netTeamSize;             // 1v1 只上 0 号，5v5 全队上场
@@ -2109,7 +2151,7 @@ function startNetMatch() {
   teamState[0].upgradeCounts = {}; teamState[1].upgradeCounts = {};
   teamState[0].upgrades = []; teamState[1].upgrades = [];
   wins = [0, 0]; kills = [0, 0]; round = 1;
-  net.events = []; net.guestPick = -1; net.inputSeq = 0; net.sentObstacleVer = -1;
+  net.events = []; net.guestPick = -1; net.inputSeq = 0; net.sentObstacleVer = -1; net.heroSig = '';
   for (const pr of net.projMap.values()) pr.dispose();
   net.projMap = new Map();
   regenerateObstacles();               // 主机生成，随后随快照同步给客户端
@@ -2130,7 +2172,12 @@ async function netStartHost() {
 }
 async function netAddHostPeer() {
   if (net.peers.length >= MAX_CLIENTS) return netMsg('已达到最大真人数量（' + (MAX_CLIENTS + 1) + ' 人）');
-  const slot = CLIENT_SLOTS[net.peers.length];
+  // 取第一个空闲槽位（已连接 + 握手中的都算占用），避免掉线后重新接入时两名玩家抢同一角色
+  const used = new Set();
+  for (const p of net.peers) used.add(p.slot);
+  if (net.pendingPeer) used.add(net.pendingPeer.slot);
+  const slot = CLIENT_SLOTS.find(s => !used.has(s));
+  if (slot === undefined) return netMsg('已达到最大真人数量（' + (MAX_CLIENTS + 1) + ' 人）');
   const peer = newPeer(slot);
   peer.edges = newPeerEdges(peer.fighter);
   peer.pc = netNewPC();
@@ -2139,7 +2186,7 @@ async function netAddHostPeer() {
   await peer.pc.setLocalDescription(offer);
   await netWaitICE(peer.pc);
   net.pendingPeer = peer;
-  netShowHostRoom(netEnc(peer.pc.localDescription), net.peers.length + 1);
+  netShowHostRoom(netEnc(peer.pc.localDescription), used.size + 1);
 }
 async function netHostAccept(code) {
   const peer = net.pendingPeer;
@@ -2163,8 +2210,12 @@ async function netJoin(code) {
 }
 
 function netTeardown() {
-  for (const p of net.peers) { net.sendTo(p, { t: 'bye' }); if (p.dc) { try { p.dc.close(); } catch (e) { } } if (p.pc) { try { p.pc.close(); } catch (e) { } } }
-  if (net.pendingPeer && net.pendingPeer.pc) { try { net.pendingPeer.pc.close(); } catch (e) { } }
+  for (const p of net.peers) { p.cancelled = true; net.sendTo(p, { t: 'bye' }); if (p.dc) { try { p.dc.close(); } catch (e) { } } if (p.pc) { try { p.pc.close(); } catch (e) { } } }
+  if (net.pendingPeer) {
+    net.pendingPeer.cancelled = true;
+    if (net.pendingPeer.dc) { try { net.pendingPeer.dc.close(); } catch (e) { } }
+    if (net.pendingPeer.pc) { try { net.pendingPeer.pc.close(); } catch (e) { } }
+  }
   for (const pr of net.projMap.values()) {
     pr.dispose();
     const i = projectiles.indexOf(pr);
@@ -2173,11 +2224,12 @@ function netTeardown() {
   net.projMap = new Map();
   net.peers = []; net.pendingPeer = null;
   net.active = false; net.connected = false; net.role = null;
-  net.latestSnap = null; net.mySlot = -1;
+  net.latestSnap = null; net.mySlot = -1; net.waitUI = false;
   netHide();
 }
 function netEnd(msg) {
   net.active = false;
+  net.waitUI = false;                     // 结束后不再允许被快照自动关闭该提示
   gameState = 'netlobby';
   netUI('<h2>连接已结束</h2><p>' + msg + '</p><div class="row"><button class="pri" id="netBack">返回主菜单</button></div>', () => {
     netui.querySelector('#netBack').onclick = () => { netTeardown(); gameState = 'menu'; stateT = 0; };
@@ -2205,6 +2257,7 @@ function netCopy(id, ok) {
   netMsg(done ? ok : '自动复制失败，请手动全选复制');
 }
 function netShowChoose() {
+  net.waitUI = true;
   const sel = netTeamSize === 1
     ? '<p><b>1v1 模式</b>：主机 + 最多 <b>1 名客户端</b>。主机操控红方 0 号，客户端操控蓝方 0 号。</p>'
     : '<p><b>5v5 模式</b>：最多 <b>4 名真人</b>（主机 + 3 名客户端）：主机操控红方 0 号，<br>客户端依次操控蓝方 0 / 1 / 2 号，其余位置由 AI 补位。</p>';
@@ -2225,6 +2278,7 @@ function netShowChoose() {
 }
 // 主机房间面板：按模式逐个接入客户端（1v1 限 1 名 / 5v5 限 3 名），再统一开始对战
 function netShowHostRoom(code, num) {
+  net.waitUI = true;
   const connected = net.peers.length;
   const ver = netTeamSize === 1 ? '1v1' : '5v5';
   let html = '<h2>联机房间 · 主机（' + ver + '）</h2>';
@@ -2238,7 +2292,12 @@ function netShowHostRoom(code, num) {
     html += '<textarea id="nbAnswer" placeholder="在此粘贴应答码…"></textarea>';
     html += '<div class="row"><button class="pri" id="nbAccept">连接</button><button id="nbCancelPeer">取消本次</button></div>';
   } else {
-    html += '<div class="row"><button class="pri" id="nbAdd">' + (connected ? '再添加一名玩家' : '生成连接码') + '</button></div>';
+    // 还有空闲槽位时才提供「添加玩家」
+    const used = new Set();
+    for (const p of net.peers) used.add(p.slot);
+    const free = CLIENT_SLOTS.some(s => !used.has(s));
+    if (free) html += '<div class="row"><button class="pri" id="nbAdd">' + (connected ? '再添加一名玩家' : '生成连接码') + '</button></div>';
+    else html += '<p>真人已满（' + (MAX_CLIENTS + 1) + ' 人），可直接开始对战。</p>';
   }
   html += '<div class="row"><button class="pri" id="nbStart">开始 ' + ver + ' 对战</button><button id="nbQuit">解散房间</button></div>';
   html += '<p id="netMsg"></p>';
@@ -2252,7 +2311,11 @@ function netShowHostRoom(code, num) {
       netHostAccept(v).catch(e => netMsg('连接失败：' + e.message));
     };
     if (q('#nbCancelPeer')) q('#nbCancelPeer').onclick = () => {
-      if (net.pendingPeer && net.pendingPeer.pc) { try { net.pendingPeer.pc.close(); } catch (e) { } }
+      if (net.pendingPeer) {
+        net.pendingPeer.cancelled = true;
+        if (net.pendingPeer.dc) { try { net.pendingPeer.dc.close(); } catch (e) { } }
+        if (net.pendingPeer.pc) { try { net.pendingPeer.pc.close(); } catch (e) { } }
+      }
       net.pendingPeer = null;
       netShowHostRoom();
     };
@@ -2263,6 +2326,7 @@ function netShowHostRoom(code, num) {
 }
 function netShowGuestInput() {
   net.role = 'guest';
+  net.waitUI = true;
   netUI(`<h2>加入房间</h2>
     <p>把主机发来的 <b>连接码</b> 粘贴到下面，然后点「生成应答码」。</p>
     <textarea id="nbOfferIn" placeholder="在此粘贴主机的连接码…"></textarea>
@@ -2278,16 +2342,32 @@ function netShowGuestInput() {
   });
 }
 function netShowGuestAnswer(code) {
+  net.waitUI = true;
   netUI(`<h2>应答码已生成</h2>
     <p>把下面的 <b>应答码</b> 复制回给主机，等待主机完成连接。</p>
     <textarea id="nbAns" readonly>${code}</textarea>
-    <div class="row"><button class="pri" id="nbCopy2">复制应答码</button></div>
+    <div class="row"><button class="pri" id="nbCopy2">复制应答码</button><button id="nbCancel2">取消并返回</button></div>
     <p id="netMsg">等待主机连接…</p>`, () => {
     netui.querySelector('#nbCopy2').onclick = () => netCopy('#nbAns', '已复制应答码，请发回给主机');
+    netui.querySelector('#nbCancel2').onclick = () => { netTeardown(); netShowChoose(); };
   });
 }
 function netShowWaiting(text) {
-  netUI('<h2>联机中</h2><p>' + text + '</p><p id="netMsg"></p>');
+  net.waitUI = true;
+  netUI('<h2>联机中</h2><p>' + text + '</p><p id="netMsg"></p><div class="row"><button id="nbLeave">断开并返回</button></div>', () => {
+    netui.querySelector('#nbLeave').onclick = () => {
+      if (net.role === 'host') {                      // 主机：放弃本次接入，回到房间面板
+        if (net.pendingPeer) {
+          net.pendingPeer.cancelled = true;
+          if (net.pendingPeer.dc) { try { net.pendingPeer.dc.close(); } catch (e) { } }
+          if (net.pendingPeer.pc) { try { net.pendingPeer.pc.close(); } catch (e) { } }
+        }
+        net.pendingPeer = null;
+        if (net.role === 'host') netShowHostRoom();
+        else netShowChoose();
+      } else { netTeardown(); netShowChoose(); }      // 客户端：断开连接并回到选择界面
+    };
+  });
 }
 
 // ================= 状态与流程 =================
@@ -2710,6 +2790,13 @@ function simulate() {
     clearPressed(); return;
   }
   if (!net.active && consume('KeyR')) { startMatch(); clearPressed(); return; }
+  // 联机主机：对局中按 Esc 主动解散并返回主菜单，与客户端行为一致（否则主机只能关掉页面）
+  if (net.active && net.role === 'host' && consume('Escape')) {
+    netTeardown();
+    gameState = 'menu'; stateT = 0;
+    menuIndex = currentMode < MENU.length ? currentMode : 0;
+    clearPressed(); return;
+  }
   if (consume('KeyP')) { paused = !paused; Music.duck = paused ? 0.3 : 1; Music.apply(0.25); }
   if (paused) { clearPressed(); return; }
 
@@ -3048,6 +3135,12 @@ function drawHUD() {
     ctx.fillStyle = net.connected ? 'rgba(126,232,250,0.92)' : 'rgba(255,120,120,0.95)';
     ctx.fillText('联机 · ' + (net.role === 'host' ? '主机' : '客户端')
       + (net.connected ? (' · ' + Math.max(0, Math.round(net.rtt)) + 'ms') : ' · 已断开'), W / 2, 118);
+    // 临时提示（如断线接管）：覆盖层已隐藏时也保证玩家看到
+    if (netNoticeT > 0) {
+      ctx.font = 'bold 16px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillStyle = 'rgba(255,196,90,' + (0.95 * Math.min(1, netNoticeT / 60)).toFixed(3) + ')';
+      ctx.fillText(netNotice, W / 2, 146);
+    }
     ctx.textBaseline = 'alphabetic';
   }
 
@@ -3734,6 +3827,7 @@ function draw2DScene() {
 function render() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, W, H);
+  if (netNoticeT > 0) netNoticeT--;
 
   // 血条平滑
   for (const f of fighters) f.hpDisplay += (f.hp - f.hpDisplay) * 0.14;
