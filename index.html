@@ -1713,7 +1713,10 @@ function hitTarget(target, attacker, dmg, stun, kind, knockUp) {
   }
   netHit(target.x, target.y + 90, target.z, kind);
   const heavyHit = kind === 'dash' || kind === 'fire' || kind === 'nova' || kind === 'whirl';
-  netShake(heavyHit ? 10 : 6);
+  const atkAng = Math.atan2(dx, dz);
+  netShake(heavyHit ? 10 : 6, atkAng);          // 方向性震屏：沿命中方向冲量
+  hitstopT = Math.max(hitstopT, heavyHit ? 5 : 3);   // 顿帧：命中瞬间冻结模拟
+  spawnSlash(attacker.x, attacker.z, atkAng, heavyHit);   // 屏幕空间刀光弧
   netFloater({
     x: target.x + rand(-14, 14), y: target.y + 175, z: target.z,
     text: '-' + dmg, vy: 1.5, life: 42,
@@ -1728,6 +1731,14 @@ function fighterDown(target, attacker) {
   target.die(attacker);
   netShake(15); netSfx('ko');
   netHit(target.x, target.y + 60, target.z, 'nova');
+  hitstopT = Math.max(hitstopT, 6);
+  // 击杀播报 + 连杀计数（2.5s 窗口内连续击杀累加）
+  if (attacker && attacker !== target) {
+    if (killStreakT > 0 && lastKiller === attacker) killStreak++; else killStreak = 1;
+    lastKiller = attacker; killStreakT = 150;
+    killBannerShow(killStreak >= 2 ? (killStreak + ' 连 杀 !') : '击 杀 !',
+      (attacker.name || '英雄') + '  →  ' + (target.name || '英雄'));
+  }
   if (!teamAlive(TEAM_RED) || !teamAlive(TEAM_BLUE)) endRound(teamAlive(TEAM_RED) ? TEAM_RED : TEAM_BLUE);
 }
 
@@ -1748,11 +1759,28 @@ function timeOut() {
 
 // ================= 特效容器 =================
 let floaters = [];
-let shakeT = 0, shakeMag = 0;
-function shake(m) { shakeMag = Math.max(shakeMag, m); shakeT = 14; }
+let shakeT = 0, shakeMag = 0, shakeAng = 0, shakeDirK = 0;   // 屏幕震动：随机量 + 方向性冲量
+let hitstopT = 0;                                           // 顿帧：命中瞬间冻结模拟若干帧
+let slashes = [];                                           // 屏幕空间刀光弧
+let killBanner = { text: '', sub: '', t: 0 };               // 击杀播报横幅
+let killStreak = 0, killStreakT = 0;                         // 连杀计数（2.5s 内连续击杀累加）
+let lastKiller = null;                                       // 上一名击杀者（换人则连杀重置）
+function shake(m, ang) {
+  shakeMag = Math.max(shakeMag, m); shakeT = 14;
+  if (ang !== undefined) { shakeAng = ang; shakeDirK = Math.max(shakeDirK, m); }
+}
+function spawnSlash(x, z, ang, fin) {
+  slashes.push({ x: x, z: z, ang: ang, life: fin ? 16 : 12, max: fin ? 16 : 12, fin: !!fin });
+  if (slashes.length > 24) slashes.shift();
+}
+function killBannerShow(text, sub) { killBanner.text = text; killBanner.sub = sub || ''; killBanner.t = 110; }
 function updateFloaters() {
   for (const f of floaters) { f.y += f.vy; f.vy *= 0.94; f.life--; }
   floaters = floaters.filter(f => f.life > 0);
+  for (const s of slashes) s.life--;
+  slashes = slashes.filter(s => s.life > 0);
+  if (killBanner.t > 0) killBanner.t--;
+  if (killStreakT > 0 && --killStreakT === 0) { killStreak = 0; lastKiller = null; }
 }
 
 // ================= 世界坐标 → 屏幕 =================
@@ -1810,10 +1838,10 @@ function netNotify(s) { netNotice = s; netNoticeT = 360; }
 
 // ---- 特效 / 音效事件：主机产生，客户端回放 ----
 function netEmit(e) { if (net.active && net.role === 'host') net.events.push(e); }
-function netFloater(o) { floaters.push(o); netEmit({ k: 'fl', o: o }); }
+function netFloater(o) { if (o.max === undefined) o.max = o.life; floaters.push(o); netEmit({ k: 'fl', o: o }); }
 function netHit(x, y, z, kind) { spawnHit(x, y, z, kind); netEmit({ k: 'hit', x: x, y: y, z: z, kind: kind }); }
 function netRing(x, z, r0, r1, color, life) { spawnRing(x, z, r0, r1, color, life); netEmit({ k: 'rg', x: x, z: z, r0: r0, r1: r1, color: color, life: life }); }
-function netShake(m) { shake(m); netEmit({ k: 'sk', m: m }); }
+function netShake(m, ang) { shake(m, ang); netEmit({ k: 'sk', m: m }); }
 function netSfx(name) { if (SFX[name]) SFX[name](); netEmit({ k: 'sfx', n: name }); }
 function applyNetEvent(e) {
   if (e.k === 'fl') floaters.push(e.o);
@@ -1973,6 +2001,7 @@ function netHostSend() {
 function netGuestStep() {
   time++;
   if (shakeT > 0) shakeT--;
+  if (shakeDirK > 0.2) shakeDirK *= 0.86; else shakeDirK = 0;
   const peer = net.peers[0];
   const me = net.mySlot >= 0 ? fighters[net.mySlot] : null;
   const open = net.connected && peer && peer.dc && peer.dc.readyState === 'open';
@@ -2680,6 +2709,7 @@ function updateProjectiles() {
 function simulate() {
   time++;
   if (shakeT > 0) shakeT--;
+  if (shakeDirK > 0.2) shakeDirK *= 0.86; else shakeDirK = 0;
   if (consume('KeyM')) { muted = !muted; Music.apply(0.15); }
 
   if (gameState === 'menu') {
@@ -2866,10 +2896,20 @@ function updateCamera() {
     else { fx = 0; fz = 0; }
   }
   const D = 1000;
-  let tx = fx, tz = fz + D * 0.62, ty = D * 0.80;
-  if (shakeT > 0) { const k = shakeMag * (shakeT / 14); tx += rand(-1, 1) * k * 4; ty += rand(-1, 1) * k * 4; tz += rand(-1, 1) * k * 4; }
+  const tx = fx, tz = fz + D * 0.62, ty = D * 0.80;
   camera.position.lerp(_mid.set(tx, ty, tz), 0.12);
-  camera.lookAt(fx, 30, fz);
+  let lx = fx, ly = 30, lz = fz;
+  if (shakeT > 0) {
+    // 刚性平移抖动：相机与视线目标同步偏移，避免被 lerp / lookAt 抵消
+    const k = shakeMag * (shakeT / 14);
+    const dk = shakeDirK * (shakeT / 14) * 2.4;        // 方向性冲量：沿命中方向推镜头
+    const sx = rand(-1, 1) * k * 2.2 + Math.sin(shakeAng) * dk;
+    const sy = rand(-1, 1) * k * 2.2;
+    const sz = rand(-1, 1) * k * 2.2 + Math.cos(shakeAng) * dk;
+    camera.position.x += sx; camera.position.y += sy; camera.position.z += sz;
+    lx += sx; ly += sy; lz += sz;
+  }
+  camera.lookAt(lx, ly, lz);
 }
 
 // ================= HUD 绘制（2D 覆盖层） =================
@@ -2940,13 +2980,14 @@ function humanSkillHint(f) {
   }).join('  ');
 }
 
-// 本地真人技能栏
+// 本地真人技能栏（环形冷却 + 就绪脉冲）
 function drawSkillBar(f, align) {
   if (!f) return;
   const iw = 52, ih = 54, gap = 10, n = f.skills.length;
   const totalW = n * iw + (n - 1) * gap;
   const x0 = align === 'left' ? 60 : W - 60 - totalW;
   const iy = H - 92;
+  if (!f._ready) f._ready = new Array(n).fill(0);
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   for (let i = 0; i < n; i++) {
     const sk = f.skills[i];
@@ -2954,26 +2995,54 @@ function drawSkillBar(f, align) {
     const cd = (f.cds && f.cds[i]) || 0;
     const ratio = clamp(cd / sk.cd, 0, 1);
     const ready = cd <= 0 && !f.dead;
+    // 就绪脉冲：冷却刚结束的瞬间记录时间戳，用于播放扩散闪光
+    if (ready && !f._ready[i]) f._ready[i] = time;
+    if (!ready) f._ready[i] = 0;
+    const pulseAge = ready && f._ready[i] ? (time - f._ready[i]) : 999;
+    const pulse = pulseAge < 22 ? (1 - pulseAge / 22) : 0;
+
+    // 底板
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
     roundRect(ix, iy, iw, ih, 8); ctx.fill();
-    ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
-    ctx.fillStyle = ready ? '#ffd166' : 'rgba(160,180,220,0.6)';
-    ctx.fillText(sk.label.slice(0, 2), ix + iw / 2, iy + 16);
-    ctx.font = 'bold 11px "PingFang SC",sans-serif';
-    ctx.fillStyle = 'rgba(200,215,245,0.6)';
-    const dispKey = (f.controls && f.controls.skillKeys && f.controls.skillKeys[i]) || sk.key;
-    ctx.fillText(keyLabel(dispKey), ix + iw / 2, iy + ih - 11);
-    if (!ready) {
-      ctx.fillStyle = 'rgba(10,14,30,0.7)';
-      roundRect(ix, iy, iw, ih * ratio, 8); ctx.fill();
-      if (cd > 0) {
-        ctx.font = 'bold 17px "PingFang SC",sans-serif';
-        ctx.fillStyle = '#eaf0ff';
-        ctx.fillText(Math.ceil(cd / 60), ix + iw / 2, iy + 30);
-      }
+
+    // 环形冷却
+    const ccx = ix + iw / 2, ccy = iy + ih / 2, rr = iw / 2 - 4;
+    ctx.beginPath(); ctx.arc(ccx, ccy, rr, 0, TAU);
+    ctx.strokeStyle = 'rgba(255,255,255,0.09)'; ctx.lineWidth = 3; ctx.stroke();
+    if (ratio > 0) {
+      ctx.beginPath();
+      ctx.arc(ccx, ccy, rr, -Math.PI / 2, -Math.PI / 2 + TAU * (1 - ratio), false);
+      ctx.strokeStyle = '#7ee8fa'; ctx.lineWidth = 3.5; ctx.stroke();
     } else {
-      ctx.strokeStyle = 'rgba(255,209,102,0.9)'; ctx.lineWidth = 2;
-      roundRect(ix, iy, iw, ih, 8); ctx.stroke();
+      ctx.beginPath(); ctx.arc(ccx, ccy, rr, 0, TAU);
+      ctx.strokeStyle = 'rgba(255,209,102,0.85)'; ctx.lineWidth = 3; ctx.stroke();
+    }
+
+    // 文字
+    ctx.font = 'bold 13px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = ready ? '#ffd166' : 'rgba(160,180,220,0.62)';
+    ctx.fillText(sk.label.slice(0, 2), ccx, iy + 17);
+    ctx.font = 'bold 11px "PingFang SC",sans-serif';
+    ctx.fillStyle = 'rgba(200,215,245,0.65)';
+    const dispKey = (f.controls && f.controls.skillKeys && f.controls.skillKeys[i]) || sk.key;
+    ctx.fillText(keyLabel(dispKey), ccx, iy + ih - 11);
+    if (cd > 0) {
+      ctx.font = 'bold 17px "PingFang SC",sans-serif';
+      ctx.fillStyle = '#eaf0ff';
+      ctx.fillText(Math.ceil(cd / 60), ccx, ccy + 1);
+    }
+
+    // 就绪脉冲闪光
+    if (pulse > 0) {
+      ctx.save();
+      ctx.globalAlpha = pulse * 0.4;
+      ctx.fillStyle = '#ffd166';
+      roundRect(ix, iy, iw, ih, 8); ctx.fill();
+      ctx.globalAlpha = pulse * 0.9;
+      ctx.beginPath(); ctx.arc(ccx, ccy, rr + 3 + (1 - pulse) * 13, 0, TAU);
+      ctx.strokeStyle = '#fff3c4'; ctx.lineWidth = 3 * pulse + 0.5; ctx.stroke();
+      ctx.restore();
+      ctx.globalAlpha = 1;
     }
   }
   ctx.textBaseline = 'alphabetic';
@@ -2985,14 +3054,91 @@ function drawFloaters() {
   for (const f of floaters) {
     const sp = project(f.x, f.y, f.z);
     if (sp.z > 1) continue;
-    const a = clamp(f.life / 40, 0, 1);
+    const maxLife = f.max || 40;
+    const a = clamp(f.life / maxLife, 0, 1);
+    // 弹跳放大：出现瞬间快速放大回弹
+    const age = maxLife - f.life;
+    const pop = age < 12 ? 1 + (1 - age / 12) * (f.big ? 0.9 : 0.55) : 1;
+    const base = f.big ? 40 : 28;
     ctx.globalAlpha = a;
-    ctx.font = 'bold ' + (f.big ? 40 : 28) + 'px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.save();
+    ctx.translate(sp.x, sp.y); ctx.scale(pop, pop);
+    ctx.font = 'bold ' + base + 'px "PingFang SC","Microsoft YaHei",sans-serif';
     ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(0,0,0,.65)';
-    ctx.strokeText(f.text, sp.x, sp.y);
+    ctx.strokeText(f.text, 0, 0);
     ctx.fillStyle = f.color;
-    ctx.fillText(f.text, sp.x, sp.y);
+    ctx.fillText(f.text, 0, 0);
+    ctx.restore();
   }
+  ctx.globalAlpha = 1;
+}
+
+// 屏幕空间刀光弧：跟随命中方向的弧线拖尾
+function drawSlashes() {
+  if (!slashes.length) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round';
+  for (const s of slashes) {
+    const t = 1 - s.life / s.max;                 // 0 → 1 进度
+    const c = project(s.x, 70, s.z);
+    if (c.z > 1) continue;
+    const e = project(s.x + Math.sin(s.ang) * 120, 70, s.z + Math.cos(s.ang) * 120);
+    const scrAng = Math.atan2(e.y - c.y, e.x - c.x);   // 命中方向在屏幕上的朝向
+    const r = (s.fin ? 108 : 78) * (0.72 + t * 0.5);
+    const span = s.fin ? Math.PI * 0.98 : Math.PI * 0.62;
+    ctx.save();
+    ctx.translate(c.x, c.y); ctx.rotate(scrAng);
+    ctx.globalAlpha = clamp((1 - t) * 1.15, 0, 1) * (s.fin ? 0.95 : 0.72);
+    ctx.lineWidth = (s.fin ? 17 : 11) * (1 - t * 0.55);
+    const grad = ctx.createLinearGradient(0, -r, 0, r);
+    grad.addColorStop(0, 'rgba(255,255,255,0)');
+    grad.addColorStop(0.5, s.fin ? 'rgba(255,238,190,0.98)' : 'rgba(214,232,255,0.88)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.strokeStyle = grad;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, -span / 2, span / 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+// 击杀播报横幅：入场下滑 + 退场淡出，连杀时转为橙红配色
+function drawKillBanner() {
+  if (killBanner.t <= 0) return;
+  const inT = clamp((110 - killBanner.t) / 10, 0, 1);
+  const outT = clamp(killBanner.t / 18, 0, 1);
+  const a = Math.min(inT, outT);
+  if (a <= 0) return;
+  const isStreak = killStreak >= 2;
+  const cx = W / 2, cy = 178;
+  const slide = (1 - easeOut(inT)) * -60;
+  const bw = 380 + Math.max(0, killBanner.text.length - 4) * 12, bh = 78;
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.globalAlpha = a;
+  ctx.translate(0, slide);
+  ctx.fillStyle = 'rgba(9,12,26,0.84)';
+  roundRect(cx - bw / 2, cy - bh / 2, bw, bh, 12); ctx.fill();
+  ctx.strokeStyle = isStreak ? 'rgba(255,124,84,0.95)' : 'rgba(255,209,102,0.95)';
+  ctx.lineWidth = 2.5;
+  roundRect(cx - bw / 2, cy - bh / 2, bw, bh, 12); ctx.stroke();
+  // 顶部高光条
+  ctx.fillStyle = isStreak ? 'rgba(255,124,84,0.55)' : 'rgba(255,209,102,0.5)';
+  roundRect(cx - 46, cy - bh / 2 - 3, 92, 5, 3); ctx.fill();
+  ctx.font = 'bold 34px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(0,0,0,.6)';
+  ctx.strokeText(killBanner.text, cx, cy - 9);
+  ctx.fillStyle = isStreak ? '#ff9a5a' : '#ffd166';
+  ctx.fillText(killBanner.text, cx, cy - 9);
+  if (killBanner.sub) {
+    ctx.font = 'bold 15px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillStyle = 'rgba(206,220,248,0.88)';
+    ctx.fillText(killBanner.sub, cx, cy + 22);
+  }
+  ctx.restore();
   ctx.globalAlpha = 1;
 }
 
@@ -3840,7 +3986,9 @@ function render() {
   if (gameState === 'keyconfig') { drawKeyConfig(); return; }
   if (gameState === 'netlobby') return;   // 联机大厅由 DOM 覆盖层呈现
   drawHUD();
+  drawSlashes();
   drawFloaters();
+  drawKillBanner();
 
   if (gameState === 'countdown') drawCountdown();
   if (gameState === 'roundover') drawRoundOver();
@@ -3857,7 +4005,11 @@ function loop(now) {
   acc += dt;
   const step = 1 / 60;
   let guard = 0;
-  while (acc >= step && guard++ < 5) { fixedUpdate(); acc -= step; }
+  while (acc >= step && guard++ < 5) {
+    if (hitstopT > 0) hitstopT--;              // 顿帧：冻结模拟，仅保留画面与特效
+    else fixedUpdate();
+    acc -= step;
+  }
   render();
   requestAnimationFrame(loop);
 }
