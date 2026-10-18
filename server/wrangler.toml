@@ -1,0 +1,33 @@
+name = "duizhan-game"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+# 非敏感配置；敏感项（TURN / 会话密钥等）通过 `wrangler secret put` 注入
+[vars]
+# 允许跨域访问 API 的额外 origin（逗号分隔）。同源部署时留空即可。
+SITE_ORIGINS = ""
+
+[[d1_databases]]
+binding = "DB"
+database_name = "duizhan-db"
+# 本地开发用占位 UUID 即可；正式部署前用 `wrangler d1 create duizhan-db` 换成本地/线上真实 ID
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[kv_namespaces]]
+binding = "SESSIONS"
+# 本地开发占位即可；正式部署前用 `wrangler kv namespace create SESSIONS` 换成真实 ID
+id = "00000000000000000000000000000000"
+
+[[durable_objects.bindings]]
+name = "GAME_ROOM"
+class_name = "GameRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GameRoom"]
+
+# 静态资源（游戏本体）：构建脚本会把仓库根目录的 index.html / three.min.js 拷进 public/
+[assets]
+directory = "./public"
+binding = "ASSETS"
