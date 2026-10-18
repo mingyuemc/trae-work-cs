@@ -11,13 +11,11 @@ SITE_ORIGINS = ""
 [[d1_databases]]
 binding = "DB"
 database_name = "duizhan-db"
-# 本地开发用占位 UUID 即可；正式部署前用 `wrangler d1 create duizhan-db` 换成本地/线上真实 ID
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "00659c40-8f3c-43d1-bbbe-038f63eab89d"
 
 [[kv_namespaces]]
 binding = "SESSIONS"
-# 本地开发占位即可；正式部署前用 `wrangler kv namespace create SESSIONS` 换成真实 ID
-id = "00000000000000000000000000000000"
+id = "e779611fe09b4d28a57cd49796dd8d6f"
 
 [[durable_objects.bindings]]
 name = "GAME_ROOM"
