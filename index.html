@@ -124,6 +124,46 @@ addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
 function consume(code) { if (pressed[code]) { pressed[code] = false; return true; } return false; }
 function clearPressed() { for (const k in pressed) delete pressed[k]; }
 
+// ---- 鼠标 / 点击：所有界面按钮都可用鼠标操作 ----
+// 绘制函数每帧登记可点击区域（uiButton），鼠标事件据此命中判定。
+let mouseX = -1, mouseY = -1;
+const uiButtons = [];
+function uiButton(x, y, w, h, fn, onHover) { uiButtons.push({ x, y, w, h, fn, onHover }); }
+function pointIn(p, b) { return p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h; }
+function hitUI(p) { for (const b of uiButtons) if (pointIn(p, b)) return b; return null; }
+function canvasPoint(e) {
+  const r = stage.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / (r.width || W) * W, y: (e.clientY - r.top) / (r.height || H) * H };
+}
+stage.addEventListener('mousemove', e => {
+  const p = canvasPoint(e); mouseX = p.x; mouseY = p.y;
+  const b = hitUI(p);
+  if (b && b.onHover) b.onHover(p);
+});
+stage.addEventListener('mouseleave', () => { mouseX = mouseY = -1; });
+stage.addEventListener('click', e => {
+  const b = hitUI(canvasPoint(e));
+  if (b && b.fn) b.fn();
+});
+// 通用按钮绘制：自带悬停高亮，并登记为可点击区域
+function drawUIButton(x, y, w, h, label, primary, fn, onHover) {
+  const hov = mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h;
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = primary
+    ? (hov ? 'rgba(255,220,120,1)' : 'rgba(255,209,102,0.86)')
+    : (hov ? 'rgba(56,71,127,0.98)' : 'rgba(38,47,92,0.95)');
+  roundRect(x, y, w, h, 9); ctx.fill();
+  ctx.strokeStyle = primary ? '#ffd166' : (hov ? 'rgba(170,200,255,0.95)' : 'rgba(140,170,240,0.5)');
+  ctx.lineWidth = hov ? 2.5 : 1.6;
+  roundRect(x, y, w, h, 9); ctx.stroke();
+  ctx.font = 'bold 18px "PingFang SC","Microsoft YaHei",sans-serif';
+  ctx.fillStyle = primary ? '#3a2600' : '#e6eeff';
+  ctx.fillText(label, x + w / 2, y + h / 2 + 1);
+  ctx.restore();
+  uiButton(x, y, w, h, fn, onHover);
+}
+
 // ================= 音频引擎（WebAudio 实时合成，无需外部音频文件） =================
 let actx = null, muted = false;
 let masterGain = null, sfxGain = null, musicGain = null, noiseBuf = null;
@@ -2543,17 +2583,19 @@ function renderAccount() {
   const q = id => netui.querySelector(id);
   if (authUser) {
     netUI(`<h2>我的账号</h2>
-      <p>用户名 <b>${esc(authUser.username)}</b>　昵称 <b>${esc(authUser.displayName || authUser.username)}</b></p>
+      <p>用户名 <b>${esc(authUser.username)}</b>${authUser.isAdmin ? ' <b>（管理员）</b>' : ''}　用户 ID <b>#${authUser.id}</b></p>
       <p>战绩 <b>${authUser.wins}</b> 胜 / <b>${authUser.losses}</b> 负　积分 <b>${authUser.rating}</b></p>
       <p class="hint">联机（P2P）对局结束后会自动上报胜负并更新积分，单机对局不计入。</p>
       <div class="row">
         <button class="pri" id="acLb">查看排行榜</button>
+        ${authUser.isAdmin ? '<button class="pri" id="acAdmin">用户管理</button>' : ''}
         <button id="acOut">退出登录</button>
         <button id="acBack">返回主菜单</button>
       </div>
       <p id="netMsg"></p>`, () => {
       q('#acLb').onclick = () => openLeaderboard();
       q('#acBack').onclick = () => acctClose();
+      if (q('#acAdmin')) q('#acAdmin').onclick = () => openAdmin();
       q('#acOut').onclick = async () => {
         if (apiBusy) return; apiBusy = true;
         try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) { }
@@ -2613,13 +2655,51 @@ async function openLeaderboard() {
     let body = '';
     rows.forEach((r, i) => {
       const me = authUser && r.id === authUser.id;
-      body += `<tr class="${me ? 'me' : ''}"><td>${i + 1}</td><td>${esc(r.displayName || r.username)}</td>`
+      body += `<tr class="${me ? 'me' : ''}"><td>${i + 1}</td><td>${r.id}</td><td>${esc(r.username)}</td>`
         + `<td>${r.wins}</td><td>${r.losses}</td><td><b>${r.rating}</b></td></tr>`;
     });
     netUI(`<h2>排行榜 · 前 ${rows.length} 名</h2>
-      <table><thead><tr><th>#</th><th>玩家</th><th>胜</th><th>负</th><th>积分</th></tr></thead><tbody>${body}</tbody></table>
+      <table><thead><tr><th>#</th><th>用户 ID</th><th>用户名</th><th>胜</th><th>负</th><th>积分</th></tr></thead><tbody>${body}</tbody></table>
       <div class="row"><button class="pri" id="lbBack">返回</button></div>`, () => {
       netui.querySelector('#lbBack').onclick = back;
+    });
+  } catch (e) { fail('加载失败：' + esc(e.message)); }
+}
+
+// ---- 管理员：用户管理界面 ----
+async function openAdmin() {
+  gameState = 'admin'; stateT = 0; clearPressed();
+  const back = () => renderAccount();
+  const fail = msg => netUI(`<h2>用户管理</h2><p>${msg}</p><div class="row"><button id="adBack">返回</button></div>`,
+    () => { netui.querySelector('#adBack').onclick = back; });
+  netUI('<h2>用户管理</h2><p>加载中…</p><div class="row"><button id="adBack">返回</button></div>',
+    () => { netui.querySelector('#adBack').onclick = back; });
+  try {
+    const d = await api('/api/admin/users');
+    const users = d.users || [];
+    let body = '';
+    users.forEach(u => {
+      const name = esc(u.username) + (u.isAdmin ? ' <b>（管理员）</b>' : '');
+      const op = u.isAdmin ? '—' : `<button class="adDel" data-id="${u.id}" data-name="${esc(u.username)}">删除</button>`;
+      body += `<tr><td>${u.id}</td><td>${name}</td><td>${u.wins}</td><td>${u.losses}</td><td>${u.rating}</td><td>${op}</td></tr>`;
+    });
+    netUI(`<h2>用户管理 · 共 ${users.length} 人</h2>
+      <table><thead><tr><th>用户 ID</th><th>用户名</th><th>胜</th><th>负</th><th>积分</th><th>操作</th></tr></thead><tbody>${body}</tbody></table>
+      <p id="netMsg"></p>
+      <div class="row"><button class="pri" id="adBack">返回</button></div>`, () => {
+      netui.querySelector('#adBack').onclick = back;
+      netui.querySelectorAll('.adDel').forEach(btn => {
+        btn.onclick = async () => {
+          const id = btn.dataset.id, name = btn.dataset.name || ('ID ' + id);
+          if (!window.confirm('确定删除用户「' + name + '」？该操作不可恢复。')) return;
+          btn.disabled = true;
+          try {
+            await api('/api/admin/users/' + id, { method: 'DELETE' });
+            netMsg('已删除用户 ' + name);
+            openAdmin();
+          } catch (e) { btn.disabled = false; netMsg('删除失败：' + e.message); }
+        };
+      });
     });
   } catch (e) { fail('加载失败：' + esc(e.message)); }
 }
@@ -3040,6 +3120,49 @@ function updateProjectiles() {
   projectiles = projectiles.filter(p => !p.dead);
 }
 
+// 主菜单项激活（键盘 Enter 与鼠标点击共用）
+function menuActivate(i) {
+  menuIndex = i;
+  const id = MENU[i].id;
+  if (id === 'keys') {
+    gameState = 'keyconfig'; stateT = 0; keycfgScheme = 0; keycfgIndex = 0; rebind = null; SFX.go();
+  } else if (id === 'account') {
+    SFX.go(); openAccount();
+  } else {
+    pendingMode = i;
+    heroPhaseTotal = id === 'pvp' ? 2 : 1;
+    heroSelectPhase = 0;
+    heroIndex = selHero[0];
+    gameState = 'heroselect'; stateT = 0;
+    SFX.go();
+  }
+}
+// 选人确认 / 返回（键盘与鼠标共用）
+function heroConfirm() {
+  selHero[heroSelectPhase] = heroIndex;
+  SFX.ready();
+  heroSelectPhase++;
+  if (heroSelectPhase >= heroPhaseTotal) {
+    const mid = MENU[pendingMode].id;
+    if (mid === 'p2p' || mid === 'p2p1') openNetLobby();
+    else startMatch(pendingMode);
+  } else {
+    heroIndex = selHero[heroSelectPhase];
+    stateT = 0;
+  }
+}
+function heroBack() { gameState = 'menu'; stateT = 0; }
+function keyResetCurrent() {
+  const sc = schemeOf(keycfgScheme), d = schemeDef(keycfgScheme);
+  sc.up = d.up; sc.down = d.down; sc.left = d.left; sc.right = d.right; sc.attack = d.attack;
+  sc.skillKeys = d.skillKeys.slice(); saveKeys(); SFX.ready();
+}
+function gameOverReturn() {
+  if (net.active || net.connected) netTeardown();
+  gameState = 'menu'; stateT = 0;
+  menuIndex = currentMode < MENU.length ? currentMode : 0;
+}
+
 function simulate() {
   time++;
   if (shakeT > 0) shakeT--;
@@ -3058,23 +3181,7 @@ function simulate() {
     }
     for (let i = 0; i < n; i++) if (consume('Digit' + (i + 1)) || consume('Numpad' + (i + 1))) menuIndex = i;
     if (menuIndex !== before) SFX.nav();
-    if (consume('Enter') || consume('Space')) {
-      if (MENU[menuIndex].id === 'keys') {
-        // 打开键位设置
-        gameState = 'keyconfig'; stateT = 0; keycfgScheme = 0; keycfgIndex = 0; rebind = null;
-        SFX.go();
-      } else if (MENU[menuIndex].id === 'account') {
-        SFX.go(); openAccount();
-      } else {
-        // 先进入选人：同屏双人需要红蓝双方各选一次，其余模式仅红方选
-        pendingMode = menuIndex;
-        heroPhaseTotal = MENU[menuIndex].id === 'pvp' ? 2 : 1;
-        heroSelectPhase = 0;
-        heroIndex = selHero[0];
-        gameState = 'heroselect'; stateT = 0;
-        SFX.go();
-      }
-    }
+    if (consume('Enter') || consume('Space')) menuActivate(menuIndex);
     clearPressed(); return;
   }
   if (gameState === 'keyconfig') {
@@ -3085,11 +3192,7 @@ function simulate() {
     if (consume('ArrowDown') || consume('KeyS')) keycfgIndex = (keycfgIndex + 1) % KEY_ACTIONS.length;
     if (keycfgIndex !== before) SFX.nav();
     if (consume('ArrowLeft') || consume('ArrowRight') || consume('Tab')) { keycfgScheme = keycfgScheme ? 0 : 1; SFX.nav(); }
-    if (consume('KeyZ')) {                          // 恢复当前方案默认键位
-      const sc = schemeOf(keycfgScheme), d = schemeDef(keycfgScheme);
-      sc.up = d.up; sc.down = d.down; sc.left = d.left; sc.right = d.right; sc.attack = d.attack;
-      sc.skillKeys = d.skillKeys.slice(); saveKeys(); SFX.ready();
-    }
+    if (consume('KeyZ')) keyResetCurrent();        // 恢复当前方案默认键位
     if (consume('Enter') || consume('Space')) { rebind = { scheme: keycfgScheme, index: keycfgIndex }; SFX.ready(); }
     if (consume('Escape')) { gameState = 'menu'; stateT = 0; menuIndex = MENU.length - 1; }
     clearPressed(); return;
@@ -3109,19 +3212,10 @@ function simulate() {
       ? (consume(SCHEME_A.attack) || consume('Enter'))
       : (consume(SCHEME_B.attack) || consume('Space'));
     const back = consume('Escape');
-    if (back) { gameState = 'menu'; stateT = 0; clearPressed(); return; }
+    if (back) { heroBack(); clearPressed(); return; }
     if (confirm) {
-      selHero[heroSelectPhase] = heroIndex;
-      SFX.ready();
-      heroSelectPhase++;
-      if (heroSelectPhase >= heroPhaseTotal) {
-        const mid = MENU[pendingMode].id;
-        if (mid === 'p2p' || mid === 'p2p1') openNetLobby();
-        else startMatch(pendingMode);
-      } else {
-        heroIndex = selHero[heroSelectPhase];
-        stateT = 0;
-      }
+      heroConfirm();
+      clearPressed(); return;
     }
     clearPressed(); return;
   }
@@ -3130,13 +3224,13 @@ function simulate() {
     if (consume('Escape')) acctClose();
     clearPressed(); return;
   }
+  if (gameState === 'admin') {
+    if (consume('Escape')) renderAccount();
+    clearPressed(); return;
+  }
   if (gameState === 'gameover') {
     updateFloaters();
-    if (consume('Enter') || consume('Space')) {
-      if (net.active || net.connected) netTeardown();
-      gameState = 'menu'; stateT = 0;
-      menuIndex = currentMode < MENU.length ? currentMode : 0;
-    }
+    if (consume('Enter') || consume('Space')) gameOverReturn();
     clearPressed(); return;
   }
   if (gameState === 'upgrade') {
@@ -3755,7 +3849,7 @@ function drawUpgrade() {
   const usc = upgradePhase === 0 ? SCHEME_A : SCHEME_B;
   const hint = waiting ? '等待联机玩家选卡…'
     : auto ? '电脑将随机选择一张'
-    : keyLabel(usc.left) + ' / ' + keyLabel(usc.right) + ' 切换　　' + keyLabel(usc.attack) + ' 确认';
+    : keyLabel(usc.left) + ' / ' + keyLabel(usc.right) + ' 切换　　' + keyLabel(usc.attack) + ' 确认（或鼠标点击卡片）';
   ctx.fillText(hint, W / 2, 196);
 
   const cw = 320, ch = 340, gap = 40;
@@ -3766,6 +3860,10 @@ function drawUpgrade() {
     const sel = i === upgradeSel;
     const st = TIER_STYLE[card.tier] || TIER_STYLE[1];
     const cx = x0 + i * (cw + gap), cy = y0, mid = cx + cw / 2;
+    const interactive = !auto && !waiting;      // 人类玩家回合才允许点击选择
+    uiButton(cx, cy, cw, ch,
+      () => { if (!interactive) return; upgradeSel = i; commitUpgrade(); },
+      () => { if (interactive && upgradeSel !== i) { upgradeSel = i; SFX.nav(); } });
     ctx.save();
     if (sel) { ctx.translate(mid, cy + ch / 2); ctx.scale(1.05, 1.05); ctx.translate(-mid, -(cy + ch / 2)); }
     const bgGrad = ctx.createLinearGradient(0, cy, 0, cy + ch);
@@ -3870,6 +3968,9 @@ function drawMenu() {
     const y = startY + row * rowH;
     const sel = i === menuIndex;
     const left = cx - cellW / 2;
+    uiButton(left, y - 21, cellW, 42,
+      () => menuActivate(i),
+      () => { if (menuIndex !== i) { menuIndex = i; SFX.nav(); } });
     if (sel) {
       ctx.fillStyle = 'rgba(255,209,102,0.14)';
       roundRect(left, y - 21, cellW, 42, 10); ctx.fill();
@@ -3892,12 +3993,12 @@ function drawMenu() {
   ctx.textAlign = 'center';
   ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(160,180,220,0.7)';
-  ctx.fillText('W / S 或 ↑ / ↓ 切换    ·    A / D 切换左右栏    ·    数字键 1-' + n + ' 直选    ·    M 静音', W / 2, 664);
+  ctx.fillText('W / S 或 ↑ / ↓ 切换    ·    A / D 切换左右栏    ·    数字键 1-' + n + ' 直选    ·    鼠标点击    ·    M 静音', W / 2, 664);
 
   const a = 0.5 + 0.5 * Math.sin(time * 0.08);
   ctx.font = 'bold 26px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,' + (0.45 + a * 0.55) + ')';
-  ctx.fillText('按  Enter  选择', W / 2, 692);
+  ctx.fillText('按  Enter  或  鼠标点击  选择', W / 2, 692);
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -3932,6 +4033,9 @@ function drawHeroSelect() {
     const cx = x0 + (i % cols) * (cw + gapX);
     const cy = y0 + Math.floor(i / cols) * (ch + gapY);
     const mid = cx + cw / 2;
+    uiButton(cx, cy, cw, ch,
+      () => { heroIndex = i; heroConfirm(); },
+      () => { if (heroIndex !== i) { heroIndex = i; SFX.nav(); } });
     ctx.save();
     if (sel) { ctx.translate(mid, cy + ch / 2); ctx.scale(1.045, 1.045); ctx.translate(-mid, -(cy + ch / 2)); }
     const bg = ctx.createLinearGradient(0, cy, 0, cy + ch);
@@ -3983,11 +4087,12 @@ function drawHeroSelect() {
   ctx.textAlign = 'center';
   ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(160,180,220,0.7)';
-  ctx.fillText('W A S D / 方向键 或 数字键 1-6 切换    ·    Esc 返回主菜单', W / 2, H - 58);
+  ctx.fillText('W A S D / 方向键 或 数字键 1-6 切换    ·    Esc 返回主菜单    ·    鼠标点击英雄即可选定', W / 2, H - 58);
   const a = 0.5 + 0.5 * Math.sin(time * 0.08);
   ctx.font = 'bold 24px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,' + (0.45 + a * 0.55) + ')';
   ctx.fillText(sideName + '按 ' + confirmKey + ' 确认', W / 2, H - 24);
+  drawUIButton(24, 24, 168, 46, '← 返回主菜单', false, heroBack);
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -4012,6 +4117,7 @@ function drawKeyConfig() {
   for (const [label, idx, c] of tabs) {
     const tw = 260, th = 46, tx = W / 2 - 270 + idx * 280, ty = 122;
     const on = idx === keycfgScheme;
+    uiButton(tx, ty, tw, th, () => { if (keycfgScheme !== idx) { keycfgScheme = idx; SFX.nav(); } });
     ctx.fillStyle = on ? 'rgba(38,44,78,0.98)' : 'rgba(16,20,38,0.9)';
     roundRect(tx, ty, tw, th, 10); ctx.fill();
     ctx.strokeStyle = on ? c : 'rgba(120,150,210,0.35)'; ctx.lineWidth = on ? 3 : 2;
@@ -4033,6 +4139,9 @@ function drawKeyConfig() {
     const listening = sel && rebind;
     const conflict = used[code] > 1;
     const ry = y0 + i * (rowH + 6), mid = ry + rowH / 2;
+    uiButton(x0, ry, rowW, rowH,
+      () => { if (rebind) return; keycfgIndex = i; rebind = { scheme: keycfgScheme, index: i }; SFX.ready(); },
+      () => { if (keycfgIndex !== i) { keycfgIndex = i; SFX.nav(); } });
     ctx.save();
     if (sel) { ctx.translate(W / 2, mid); ctx.scale(1.02, 1.02); ctx.translate(-W / 2, -mid); }
     ctx.fillStyle = sel ? 'rgba(38,44,78,0.98)' : 'rgba(16,20,38,0.92)';
@@ -4068,13 +4177,16 @@ function drawKeyConfig() {
   ctx.textAlign = 'center';
   ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(160,180,220,0.75)';
-  ctx.fillText('↑ / ↓ 选择操作　·　← / → 切换红 / 蓝方　·　Enter 修改按键　·　Z 恢复默认', W / 2, H - 62);
+  ctx.fillText('↑ / ↓ 选择操作　·　← / → 切换红 / 蓝方　·　Enter 修改按键　·　Z 恢复默认　·　鼠标点击同样可用', W / 2, H - 62);
   ctx.fillStyle = 'rgba(140,160,200,0.6)';
   ctx.fillText('键位会自动保存在本机。红方键用于单机 / 联机本机操控，蓝方键用于同屏双人第二位玩家。', W / 2, H - 40);
   const a2 = 0.5 + 0.5 * Math.sin(time * 0.08);
   ctx.font = 'bold 22px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,' + (0.4 + a2 * 0.6) + ')';
   ctx.fillText('按 Esc 返回主菜单', W / 2, H - 14);
+  drawUIButton(W / 2 - 210, 600, 190, 46, '恢复默认', false, keyResetCurrent);
+  drawUIButton(W / 2 + 20, 600, 190, 46, '← 返回主菜单', false,
+    () => { gameState = 'menu'; stateT = 0; menuIndex = MENU.length - 1; });
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -4111,8 +4223,9 @@ function drawGameOver() {
   const a = 0.5 + 0.5 * Math.sin(time * 0.08);
   ctx.font = 'bold 28px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,' + (0.4 + a * 0.6) + ')';
-  ctx.fillText('按 Enter 返回主菜单', W / 2, 540);
+  ctx.fillText('按 Enter 返回主菜单', W / 2, 528);
   ctx.globalAlpha = 1;
+  drawUIButton(W / 2 - 130, 556, 260, 54, '返回主菜单', true, gameOverReturn);
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -4127,6 +4240,8 @@ function drawPaused() {
   ctx.font = 'bold 26px "PingFang SC","Microsoft YaHei",sans-serif';
   ctx.fillStyle = 'rgba(200,215,255,0.8)';
   ctx.fillText('按 P 继续', W / 2, H / 2 + 70);
+  drawUIButton(W / 2 - 110, H / 2 + 108, 220, 52, '继续游戏', true,
+    () => { paused = false; Music.duck = 1; Music.apply(0.25); });
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -4326,6 +4441,7 @@ function draw2DScene() {
 function render() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, W, H);
+  uiButtons.length = 0;                       // 每帧重建可点击区域
   if (netNoticeT > 0) netNoticeT--;
 
   // 血条平滑
@@ -4338,7 +4454,7 @@ function render() {
   if (gameState === 'heroselect') { drawHeroSelect(); return; }
   if (gameState === 'keyconfig') { drawKeyConfig(); return; }
   if (gameState === 'netlobby') return;   // 联机大厅由 DOM 覆盖层呈现
-  if (gameState === 'account' || gameState === 'leaderboard') return;   // 账号 / 排行榜由 DOM 覆盖层呈现
+  if (gameState === 'account' || gameState === 'leaderboard' || gameState === 'admin') return;   // 账号 / 排行榜 / 用户管理由 DOM 覆盖层呈现
   drawHUD();
   drawSlashes();
   drawFloaters();

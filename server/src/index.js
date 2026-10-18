@@ -25,7 +25,7 @@ app.use('/api/*', async (c, next) => {
   const allowed = sameOrigin || allowedOrigins(c.env).includes(origin);
   if (c.req.method === 'OPTIONS') {
     const headers = {
-      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+      'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type,Authorization',
       'Access-Control-Max-Age': '86400'
     };
@@ -56,8 +56,40 @@ async function requireSession(c) {
   return { session };
 }
 
+async function requireAdmin(c) {
+  const { session, error } = await requireSession(c);
+  if (error) return { error };
+  const row = await c.env.DB.prepare('SELECT is_admin FROM users WHERE id = ?').bind(session.userId).first();
+  if (!row || !row.is_admin) return { error: errorResponse('需要管理员权限', 403) };
+  return { session };
+}
+
+// 管理员账号引导：读取 ADMIN_USERNAME / ADMIN_PASSWORD 环境变量，
+// 若该账号不存在则创建（并标记为管理员），已存在则确保管理员标记。
+async function ensureAdmin(env) {
+  const username = String(env.ADMIN_USERNAME || '').trim();
+  const password = String(env.ADMIN_PASSWORD || '');
+  if (!username || !password) return;
+  const existing = await env.DB.prepare('SELECT id, is_admin FROM users WHERE username = ?').bind(username).first();
+  if (existing) {
+    if (!existing.is_admin) {
+      await env.DB.prepare('UPDATE users SET is_admin = 1 WHERE id = ?').bind(existing.id).run();
+    }
+    return;
+  }
+  const hashed = await hashPassword(password);
+  await env.DB.prepare(
+    'INSERT INTO users (username, display_name, password_hash, password_salt, is_admin) VALUES (?, ?, ?, ?, 1)'
+  )
+    .bind(username, username, hashed.hash, hashed.salt)
+    .run();
+}
+
 // ---- 健康检查 ----
-app.get('/api/health', (c) => jsonResponse({ ok: true, turn: turnConfigured(c.env) }));
+app.get('/api/health', async (c) => {
+  try { await ensureAdmin(c.env); } catch { /* 忽略引导失败 */ }
+  return jsonResponse({ ok: true, turn: turnConfigured(c.env) });
+});
 
 // ---- TURN / ICE 配置 ----
 // 按 IP 做简单限流，避免 TURN 凭证被滥用消耗中转流量。
@@ -118,6 +150,7 @@ app.post('/api/auth/login', async (c) => {
   const username = String(payload.username || '').trim();
   const password = String(payload.password || '');
   if (!username || !password) return errorResponse('请输入用户名和密码');
+  try { await ensureAdmin(c.env); } catch { /* 忽略引导失败 */ }
 
   const user = await c.env.DB.prepare(
     'SELECT id, username, display_name, password_hash, password_salt FROM users WHERE username = ?'
@@ -149,7 +182,7 @@ app.get('/api/auth/session', async (c) => {
   const session = await currentSession(c);
   if (!session) return jsonResponse({ user: null });
   const row = await c.env.DB.prepare(
-    'SELECT id, username, display_name, wins, losses, rating FROM users WHERE id = ?'
+    'SELECT id, username, display_name, wins, losses, rating, is_admin FROM users WHERE id = ?'
   )
     .bind(session.userId)
     .first();
@@ -164,7 +197,8 @@ app.get('/api/auth/session', async (c) => {
       displayName: row.display_name,
       wins: row.wins,
       losses: row.losses,
-      rating: row.rating
+      rating: row.rating,
+      isAdmin: !!row.is_admin
     }
   });
 });
@@ -245,6 +279,44 @@ app.get('/api/leaderboard', async (c) => {
       rating: row.rating
     }))
   });
+});
+
+// ---- 管理员：用户管理 ----
+app.get('/api/admin/users', async (c) => {
+  const { error } = await requireAdmin(c);
+  if (error) return error;
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, username, wins, losses, rating, is_admin, created_at
+     FROM users
+     ORDER BY id ASC`
+  ).all();
+  return jsonResponse({
+    users: results.map((row) => ({
+      id: Number(row.id),
+      username: row.username,
+      wins: row.wins,
+      losses: row.losses,
+      rating: row.rating,
+      isAdmin: !!row.is_admin,
+      createdAt: row.created_at
+    }))
+  });
+});
+
+app.delete('/api/admin/users/:id', async (c) => {
+  const { session, error } = await requireAdmin(c);
+  if (error) return error;
+  const targetId = Number(c.req.param('id'));
+  if (!Number.isInteger(targetId) || targetId <= 0) return errorResponse('用户 ID 无效');
+  if (targetId === Number(session.userId)) return errorResponse('不能删除自己的管理员账号');
+  const target = await c.env.DB.prepare('SELECT is_admin FROM users WHERE id = ?').bind(targetId).first();
+  if (!target) return errorResponse('用户不存在', 404);
+  if (target.is_admin) return errorResponse('不能删除管理员账号', 403);
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM matches WHERE user_id = ?').bind(targetId),
+    c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(targetId)
+  ]);
+  return jsonResponse({ ok: true });
 });
 
 // ---- 静态资源兜底 ----
